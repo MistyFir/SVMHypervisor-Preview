@@ -19,7 +19,7 @@ SVMHypervisor 利用 AMD-V (SVM) 的嵌套页表 (NPT) 机制，通过为 Guest 
 |------|------|------|
 | `g_VmStart` | `BOOLEAN` | 置 `TRUE` 启动 SVM 虚拟化 |
 | `g_Unload` | `BOOLEAN` | 置 `TRUE` 允许驱动卸载 |
-| `g_bDebug` | `BOOLEAN` | 置 `TRUE` 开启调试输出 |
+| `g_bDebug` | `BOOLEAN` | 置 `TRUE` 开启调试模式 |
 | `g_Test` | `BOOLEAN` | 测试变量，置`TRUE` `test`函数返回`STATUS_SUCCESS`，置`FALSE`返回`STATUS_ACCESS_DENIED` |
 | `g_Test1` | `BOOLEAN` | 测试变量，用于测试Hypervisor只读内存是否生效 |
 | `g_CpuContexts` | `PCPU_CONTEXT` | 各 CPU 上下文数组，Guest状态下不可用 |
