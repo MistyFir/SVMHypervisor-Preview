@@ -252,7 +252,7 @@ VOID ResetShadowPageCallback(PVOID context)
 	{
 		KeSetPriorityThread((PKTHREAD)KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
 		timeout.QuadPart = -10000 * 5;
-		if (!g_VmStart) return;
+		if (!g_bSvmRunning) break;
 		for (UINT32 i = 0; i < min(CpuCount, MAX_SVM_THREADS); i++)
 		{
 			PROCESSOR_NUMBER processorNumber = { 0 };
@@ -267,7 +267,6 @@ VOID ResetShadowPageCallback(PVOID context)
 			}
 			KeRevertToUserGroupAffinityThread(&oldAffinity);
 		}
-		if (!g_bSvmRunning) break;
 		KeDelayExecutionThread(KernelMode, FALSE, &timeout);
 	}
 }
