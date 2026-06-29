@@ -13,6 +13,7 @@
 #define GET_PT(PageIndex) ((PageIndex) & 0x1FF)
 #define MAX_POOL_PAGES 8192
 #define INVALID_PA ((UINT64)-1)
+#define STACK_SIZE 0x20000
 #pragma warning(disable:4201)
 typedef union _VIRTUAL_ADDRESS_X64
 {
@@ -191,7 +192,7 @@ typedef struct _PTE_INFO
 {
     MEMORY_INFO PML4;
     MEMORY_INFO PDPT;
-    MEMORY_INFO PD;
+    MEMORY_INFO PD[512];
     MEMORY_INFO PT;
 }PTE_INFO,*PPTE_INFO;
 typedef struct _CPU_CONTEXT
@@ -209,6 +210,13 @@ typedef struct _CPU_CONTEXT
 	PTE_INFO PageTableInfo;
     KSPIN_LOCK VmExitLock;
 	KIRQL OldIrql;
+    struct
+    {
+        UINT64 VmmcallCookie;
+        UINT64 Tsc;
+        BOOLEAN Valid;
+    }Token;
+    BOOLEAN Running;
 }CPU_CONTEXT, * PCPU_CONTEXT;
 typedef struct _PDP_LARGE_TABLE_INFO
 {
@@ -235,7 +243,7 @@ __forceinline void BuildMemoryInfo(PMEMORY_INFO MemInfo,UINT64 PhysicalAddress,P
 }
 extern PAGE_INFO PageList;
 EXTERN_C _declspec(dllexport) PCPU_CONTEXT g_CpuContexts;
-
+EXTERN_C MEMORY_INFO g_ZeroPage;
 BOOLEAN CreateSvmPageTable(PCPU_CONTEXT CpuContext);
 BOOLEAN AllocateNptPageTable(PMEMORY_INFO MemoryInfo, SIZE_T size);
 void FreeNptPageTable(PMEMORY_INFO MemoryInfo);
@@ -250,4 +258,4 @@ BOOLEAN PushFromPageList(PMEMORY_INFO Memory, UINT32 Index);
 BOOLEAN Is2MBytePageTable(PCPU_CONTEXT CpuContext, UINT64 GuestPhysicalAddr);
 BOOLEAN BuildNestedPageTables1GByte(PCPU_CONTEXT CpuContext);
 UINT64 GpaToHpa(PCPU_CONTEXT CpuContext, UINT64 GuestPhysicalAddress);
-BOOLEAN SetNestedPageProtection(PCPU_CONTEXT Context, UINT64 VirtualAddress, SIZE_T MapSize, BOOLEAN NoExecute, BOOLEAN Write);
+BOOLEAN SetNestedPageProtection(PCPU_CONTEXT Context, UINT64 VirtualAddress, SIZE_T MapSize, BOOLEAN Hide, BOOLEAN NoExecute, BOOLEAN Write);

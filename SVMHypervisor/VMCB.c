@@ -65,15 +65,23 @@ BOOLEAN AllocVMCB(PCPU_CONTEXT context)
 		result = (AllocateNptPageTable(&(context->GuestVmcb), PAGE_SIZE) 
 			   && AllocateNptPageTable(&(context->Hsave), PAGE_SIZE) 
 			   && AllocateNptPageTable(&(context->HostVmcb), PAGE_SIZE) 
-			   && AllocateNptPageTable(&(context->GuestStack), PAGE_SIZE * 2) 
-			   && AllocateNptPageTable(&(context->HostStack),PAGE_SIZE *2)
 			   && AllocateNptPageTable(&(context->Iopm), PAGE_SIZE * 3) 
 			   && AllocateNptPageTable(&(context->Msrpm), PAGE_SIZE * 2));
 	} while (FALSE);
 	if (!result)
 	{
 		FreeVMCB(context);
+		return result;
 	}
+	PVOID hostStack = NULL;
+	hostStack = ExAllocatePool2(POOL_FLAG_NON_PAGED, STACK_SIZE, 'SVM');
+	if (!hostStack)
+	{
+		FreeVMCB(context);
+		return FALSE;
+	}
+	memset(hostStack, 0, STACK_SIZE);
+	BuildMemoryInfo(&(context->HostStack), (UINT64)MmGetPhysicalAddress(hostStack).QuadPart, hostStack, STACK_SIZE);
 	return result;
 }
 BOOLEAN InitVMCB(PCPU_CONTEXT context)
@@ -107,7 +115,7 @@ BOOLEAN InitVMCB(PCPU_CONTEXT context)
 		vmcb->ControlArea.NCr3 = context->PageTableInfo.PML4.PhysicalAddress.QuadPart;
 		vmcb->ControlArea.GuestAsid = context->CpuIndex + 1;
 		vmcb->ControlArea.InterceptException |= INTERCEPT_EXCP_BP;
-		vmcb->ControlArea.InterceptMisc1 |= INTERCEPT_MISC1_SHUTDOWN | INTERCEPT_MISC1_IOIO;
+		vmcb->ControlArea.InterceptMisc1 |= INTERCEPT_MISC1_SHUTDOWN | INTERCEPT_MISC1_IOIO | INTERCEPT_MISC1_MSR;
 		vmcb->ControlArea.InterceptMisc2 |= INTERCEPT_MISC2_VMMCALL | INTERCEPT_MISC2_VMRUN;
 		vmcb->StateSaveArea.Cr0 = __readcr0();
 		vmcb->StateSaveArea.Cr2 = __readcr2();
@@ -136,9 +144,9 @@ BOOLEAN InitVMCB(PCPU_CONTEXT context)
 		vmcb->ControlArea.MsrpmBasePa = context->Msrpm.PhysicalAddress.QuadPart;
 		IOPM_ENABLE_PORT(((PUCHAR)context->Iopm.VirtualAddress), 0xB2);
 		IOPM_ENABLE_PORT(((PUCHAR)context->Iopm.VirtualAddress), 0xB0);
-		//((PUINT8)context->Msrpm.VirtualAddress)[0x820] |= 0x03;
+		((PUINT8)context->Msrpm.VirtualAddress)[0x820] |= 0x03;
 		vmcb->StateSaveArea.GPat = __readmsr(MSR_PAT);
-		hostVmcb->StateSaveArea.Rsp = PTR_ADD(UINT64, context->HostStack.VirtualAddress, PAGE_SIZE * 2 - 8);
+		hostVmcb->StateSaveArea.Rsp = PTR_ADD(UINT64, context->HostStack.VirtualAddress, STACK_SIZE - 8);
 		*(UINT64*)hostVmcb->StateSaveArea.Rsp = (UINT64)context;
 		result = TRUE;
 	} while (FALSE);
@@ -156,7 +164,7 @@ BOOLEAN StartSVM(PCPU_CONTEXT context)
 	guestVmcb->StateSaveArea.Rip = context->ThreadContext.Rip;
 	guestVmcb->StateSaveArea.Rsp = context->ThreadContext.Rsp;
 	guestVmcb->StateSaveArea.Efer = (__readmsr(MSR_EFER) | EFER_SVME);
-	hostVmcb->StateSaveArea.Rsp = PTR_ADD(UINT64, context->HostStack.VirtualAddress, PAGE_SIZE * 2 - 8);
+	hostVmcb->StateSaveArea.Rsp = PTR_ADD(UINT64, context->HostStack.VirtualAddress, STACK_SIZE - 8);
 	__writemsr(MSR_EFER, __readmsr(MSR_EFER) | EFER_SVME);
 	__svm_vmsave(context->GuestVmcb.PhysicalAddress.QuadPart);
 	__writemsr(MSR_VM_HSAVE_PA, context->Hsave.PhysicalAddress.QuadPart);
@@ -178,7 +186,10 @@ void FreeVMCB(PCPU_CONTEXT context)
 	FreeNptPageTable(&(context->HostVmcb));
 	FreeNptPageTable(&(context->Iopm));
 	FreeNptPageTable(&(context->Msrpm));
-	FreeNptPageTable(&(context->GuestStack));
-	FreeNptPageTable(&(context->HostStack));
+	if (context->HostStack.VirtualAddress)
+	{
+		ExFreePoolWithTag(context->HostStack.VirtualAddress, 'SVM');
+		memset(&(context->HostStack), 0, sizeof(MEMORY_INFO));
+	}
 }
 #pragma code_seg()

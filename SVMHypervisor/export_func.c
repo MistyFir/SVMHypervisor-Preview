@@ -1,6 +1,77 @@
 ﻿#include "export_func.h"
 #include "VMCB.h"
 #pragma code_seg(".entry$002")
+void SvmGetGuestVmcb(PCPU_CONTEXT CpuContext, PMEMORY_INFO GuestVmcb)
+{
+	if (CpuContext && GuestVmcb)
+	{
+		memcpy(GuestVmcb, &(CpuContext->GuestVmcb), sizeof(MEMORY_INFO));
+	}
+}
+BOOLEAN SvmAddVmexitCallback(VMEXIT_CALLBACK Callback, UINT32 Flag, PUINT32 Index)
+{
+	if (!Callback || !Flag) return FALSE;
+	BOOLEAN result = FALSE;
+	VMEXIT_CALLBACK* CallbackList = NULL;
+	PKSPIN_LOCK Lock = NULL;
+	if (Flag == VMM_CALLBACK)
+	{
+		CallbackList = g_HyperCallbackList;
+		Lock = &g_HyperCallbackListLock;
+	}
+	else if (Flag == CPUID_CALLBACK)
+	{
+		CallbackList = g_CpuidCallbackList;
+		Lock = &g_CpuidCallbackListLock;
+	}
+	else if (Flag == BP_CALLBACK)
+	{
+		CallbackList = g_BpCallbackList;
+		Lock = &g_BpCallbackListLock;
+	}
+	else return result;
+	KIRQL oldIrql = 0;
+	KeAcquireSpinLock(Lock, &oldIrql);
+	for (UINT32 i = 0; i < MAX_CALLBACK_COUNT; i++)
+	{
+		if (!CallbackList[i])
+		{
+			CallbackList[i] = Callback;
+			if (Index) *Index = i;
+			result = TRUE;
+			break;
+		}
+	}
+	KeReleaseSpinLock(Lock, oldIrql);
+	return result;
+}
+BOOLEAN SvmRemoveVmexitCallback(UINT32 Flag, UINT32 Index)
+{
+	if (!Flag || Index >= MAX_CALLBACK_COUNT) return FALSE;
+	VMEXIT_CALLBACK* CallbackList = NULL;
+	PKSPIN_LOCK Lock = NULL;
+	if (Flag == VMM_CALLBACK)
+	{
+		CallbackList = g_HyperCallbackList;
+		Lock = &g_HyperCallbackListLock;
+	}
+	else if (Flag == CPUID_CALLBACK)
+	{
+		CallbackList = g_CpuidCallbackList;
+		Lock = &g_CpuidCallbackListLock;
+	}
+	else if (Flag == BP_CALLBACK)
+	{
+		CallbackList = g_BpCallbackList;
+		Lock = &g_BpCallbackListLock;
+	}
+	else return FALSE;
+	KIRQL oldIrql = 0;
+	KeAcquireSpinLock(Lock, &oldIrql);
+	if (CallbackList[Index]) CallbackList[Index] = NULL;
+	KeReleaseSpinLock(Lock, oldIrql);
+	return TRUE;
+}
 PHOOK_INFO SvmAddHookInfo(PCSTR TagStr, UINT64 VirtualAddress, SIZE_T MapSize)
 {
 	return AddHookInfo(&HookListHead, TagStr, VirtualAddress, MapSize, &HookListLock);

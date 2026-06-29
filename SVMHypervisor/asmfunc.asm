@@ -101,18 +101,20 @@ VMASM_START::
 AsmLaunchVm proc
     mov [rcx+0A8h], rsp
     mov rsp, [rcx+90h]
-    add rsp, 1FF8h
+    add rsp, 1FFF8h
     mov rax, [rsp]
     mov rax, [rax+8]
 @vm_loop:
     vmload rax
     vmrun rax
-    vmsave rax
     clgi
-    cmp g_bSvmRunning, 0
+    vmsave rax
+    mov rax, [rsp]
+    mov rax, [rax+35F8h]
+    cmp rax, 0
     je @vm_cleanup
-    cmp g_SuspendGuest, 1
-    je @vm_cleanup
+    mov rax, [rsp]
+    mov rax, [rax+8h]
     sub rsp, 100h
     push r15
     push r14
@@ -166,7 +168,6 @@ AsmLaunchVm proc
     mov rax, [rax]
     ;   rax = GuestVmcb->ControlArea.NRip
     mov rax, [rax+0C8h]
-    stgi
     jmp rax
 AsmLaunchVm endp
 
@@ -185,11 +186,20 @@ __readrsp endp
 __jump proc
     jmp rcx
 __jump endp
+__writerax proc
+mov rax, rcx
+ret
+__writerax endp
+
+__readrax proc
+mov qword ptr [rcx], 0
+mov qword ptr [rcx], rax
+ret
+__readrax endp
 __svm_vmmcall proc
-    push rax
     xor rax, rax
+    mov rax, rcx
     vmmcall
-    pop rax
     ret
 __svm_vmmcall endp
 

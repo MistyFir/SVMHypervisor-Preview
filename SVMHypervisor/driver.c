@@ -9,8 +9,7 @@
 #include <ntstrsafe.h>
 #include <intrin.h>
 VOID DriverUnload(PDRIVER_OBJECT DriverObject);
-DWORD64 g_Pid = 0;
-PVOID g_OriginalFunc = NULL;
+#define MAX_READ 256
 #define PROCESS_TERMINATE 0x0001
 #define ORIGINAL_CODE_SIZE 15
 #define VMASM_LENGTH (AsmGetVmAsmEndAddress() - AsmGetVmAsmStartAddress())
@@ -43,9 +42,17 @@ UINT64 ShadowStart = 0;
 LIST_ENTRY HookListHead = { 0 };
 KSPIN_LOCK HookListLock = { 0 };
 PCALLBACK_OBJECT g_PowerCallbackObj = NULL;
+PETHREAD g_ResetShadowPageThreadObject = NULL;
 PVOID g_PowerCallbackHandle = NULL;
 PCPU_CONTEXT g_CpuContexts = NULL;
-PAGE_INFO PageList = { .MemoryList = {0},.AccessedList = {0} };
+PAGE_INFO PageList = { 0 };
+PVOID g_ReadMemoryTable[MAX_READ] = { 0 };
+KSPIN_LOCK g_CpuidCallbackListLock = { 0 };
+KSPIN_LOCK g_BpCallbackListLock = { 0 };
+KSPIN_LOCK g_HyperCallbackListLock = { 0 };
+VMEXIT_CALLBACK g_CpuidCallbackList[MAX_CALLBACK_COUNT] = { 0 };
+VMEXIT_CALLBACK g_BpCallbackList[MAX_CALLBACK_COUNT] = { 0 };
+VMEXIT_CALLBACK g_HyperCallbackList[MAX_CALLBACK_COUNT] = { 0 };
 #pragma data_seg()
 #pragma data_seg("shadow$003")
 UINT64 ShadowEnd = 0;
@@ -58,10 +65,11 @@ BOOLEAN g_VmStart = FALSE;
 volatile BOOLEAN g_bSvmRunning = 0;
 volatile ULONG CpuCount = 0;
 volatile BOOLEAN g_SuspendGuest = FALSE;
-PETHREAD g_ResetShadowPageThreadObject = NULL;
 PMDL g_Mdl = NULL;
 BOOLEAN g_Unload = FALSE;
 BOOLEAN g_bDebug = FALSE;
+PVOID g_OriginalFunc = NULL;
+MEMORY_INFO g_ZeroPage = { 0 };
 #pragma code_seg()
 #pragma comment(linker, "/SECTION:roc,RW,ALIGN=4096")
 typedef NTSTATUS(__stdcall* SVM_WORKER)(ULONG_PTR context);
@@ -69,6 +77,7 @@ typedef NTSTATUS(__stdcall* SVM_WORKER)(ULONG_PTR context);
 #pragma data_seg("nroc")
 PUINT8 g_Address = NULL;
 BOOLEAN g_Test = FALSE;
+DWORD64 g_Pid = 0;
 #pragma code_seg()
 #pragma comment(linker, "/SECTION:nroc,RW,ALIGN=4096")
 #pragma code_seg(".entry$001")
@@ -189,14 +198,15 @@ NTSTATUS __stdcall Hook_Func(PHOOK_REGS Regs)
 {
 	// Protect the target process and hook PspTerminateThreadByPointer
 	PETHREAD Thread = (PETHREAD)Regs->Rcx;
-	if ((UINT64)PsGetThreadId(Thread) == (UINT64)PsGetThreadId(g_ResetShadowPageThreadObject))
+	PETHREAD ResetShadowPageThreadObject = (PETHREAD)HvReadMemory(0);
+	if ((UINT64)PsGetThreadId(Thread) == (UINT64)PsGetThreadId(ResetShadowPageThreadObject))
 	{
 		return STATUS_ACCESS_DENIED;
 	}
 #ifdef DBG
 	if (PsGetThreadProcessId(Thread) == (HANDLE)g_Pid)
 	{
-		if ((HANDLE)g_Pid!=PsGetCurrentProcessId() && PsGetCurrentProcessId()!=(HANDLE)4)
+		if ((HANDLE)g_Pid!=PsGetCurrentProcessId())
 		{
 			if (g_bDebug) DbgPrintEx(77, 0, "[*]EPT HOOK PspTerminateThreadByPointer Success! Target PID: %llu Current PID: %llu Current TID: %llu\n", (DWORD64)g_Pid,(DWORD64)PsGetCurrentProcessId(),(DWORD64)PsGetCurrentThreadId());
 			return STATUS_ACCESS_DENIED;
@@ -205,6 +215,8 @@ NTSTATUS __stdcall Hook_Func(PHOOK_REGS Regs)
 #endif
 	return STATUS_SUCCESS;
 }
+#pragma code_seg()
+#pragma code_seg(".HOOK$003")
 void HookEnd() { return; }
 #pragma code_seg()
 #pragma comment(linker, "/SECTION:.HOOK,ER,ALIGN=4096")
@@ -226,45 +238,6 @@ NTSTATUS SvmWorkerCallback(PCPU_CONTEXT context)
 	status = STATUS_SUCCESS;
 	return status;
 }
-VOID MyCallback(PVOID context)
-{
-	UNREFERENCED_PARAMETER(context);
-	for (size_t i = 0; i < 10; i++)
-	{
-		if (test2() != STATUS_SUCCESS)
-		{
-			DbgPrintEx(77, 0, "[-]核心%d调用test2失败！\n", KeGetCurrentProcessorNumber());
-		}
-		NTSTATUS status = test();
-		if (status == STATUS_ACCESS_DENIED)
-		{
-			DbgPrintEx(77, 0, "[-]核心%d拒绝访问！\n", KeGetCurrentProcessorNumber());
-		}
-		else if (status == STATUS_SUCCESS)
-		{
-			DbgPrintEx(77, 0, "[+]核心%d访问成功！\n", KeGetCurrentProcessorNumber());
-		}
-	}
-	LARGE_INTEGER timeout = { 0 };
-	timeout.QuadPart = -10000 * 1000 * 30;
-	//KeDelayExecutionThread(KernelMode, FALSE, &timeout);
-	for (size_t i = 0; i < 500; i++)
-	{
-		if (test2() != STATUS_SUCCESS)
-		{
-			DbgPrintEx(77, 0, "[-]核心%d调用test2失败！\n", KeGetCurrentProcessorNumber());
-		}
-		NTSTATUS status = test();
-		if (status == STATUS_ACCESS_DENIED)
-		{
-			DbgPrintEx(77, 0, "[-]核心%d拒绝访问！\n", KeGetCurrentProcessorNumber());
-		}
-		else if(status==STATUS_SUCCESS)
-		{
-			DbgPrintEx(77, 0, "[+]核心%d访问成功！\n", KeGetCurrentProcessorNumber());
-		}
-	}
-}
 VOID ResetShadowPageCallback(PVOID context)
 {
 	UNREFERENCED_PARAMETER(context);
@@ -280,20 +253,21 @@ VOID ResetShadowPageCallback(PVOID context)
 		KeSetPriorityThread((PKTHREAD)KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
 		timeout.QuadPart = -10000 * 5;
 		if (!g_VmStart) return;
-		if (g_bSvmRunning)
+		for (UINT32 i = 0; i < min(CpuCount, MAX_SVM_THREADS); i++)
 		{
-			for (UINT32 i = 0; i < min(CpuCount, MAX_SVM_THREADS); i++)
+			PROCESSOR_NUMBER processorNumber = { 0 };
+			GROUP_AFFINITY affinity = { 0 }, oldAffinity = { 0 };
+			KeGetProcessorNumberFromIndex(i, &processorNumber);
+			affinity.Group = processorNumber.Group;
+			affinity.Mask = 1ULL << processorNumber.Number;
+			KeSetSystemGroupAffinityThread(&affinity, &oldAffinity);
+			if (g_bSvmRunning && !g_SuspendGuest)
 			{
-				PROCESSOR_NUMBER processorNumber = { 0 };
-				GROUP_AFFINITY affinity = { 0 }, oldAffinity = { 0 };
-				KeGetProcessorNumberFromIndex(i, &processorNumber);
-				affinity.Group = processorNumber.Group;
-				affinity.Mask = 1ULL << processorNumber.Number;
-				KeSetSystemGroupAffinityThread(&affinity, &oldAffinity);
 				AsmResetShadow();
-				KeRevertToUserGroupAffinityThread(&oldAffinity);
 			}
+			KeRevertToUserGroupAffinityThread(&oldAffinity);
 		}
+		if (!g_bSvmRunning) break;
 		KeDelayExecutionThread(KernelMode, FALSE, &timeout);
 	}
 }
@@ -312,6 +286,9 @@ NTSTATUS CreateResetShadowPageCallback()
 	);
 	ObReferenceObjectByHandle(threadHandle, THREAD_ALL_ACCESS, *PsThreadType, KernelMode, (PVOID*)&g_ResetShadowPageThreadObject, NULL);
 	ZwClose(threadHandle);
+#if DBG
+	if (g_bDebug) DbgPrintEx(77, 0, "ResetShadowPageThreadObject Address: %llX\n",(UINT64)g_ResetShadowPageThreadObject);
+#endif
 	return status;
 }
 NTSTATUS CreateAllSvmWorkCallback()
@@ -334,13 +311,14 @@ NTSTATUS CreateAllSvmWorkCallback()
 }
 BOOLEAN PrepareAllCpus()
 {
-	g_CpuContexts = ExAllocatePool2(POOL_FLAG_NON_PAGED, CpuCount * sizeof(CPU_CONTEXT), 'SVM');
+	if (!AllocateNptPageTable(&g_ZeroPage, PAGE_SIZE)) return FALSE;
+	g_CpuContexts = ExAllocatePool2(POOL_FLAG_NON_PAGED, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), 'SVM');
 	if (!g_CpuContexts)
 	{
 		DbgPrintEx(77, 0, "[-]Failed to allocate g_CpuContexts.\n");
 		return FALSE;
 	}
-	memset(g_CpuContexts, 0, CpuCount * sizeof(CPU_CONTEXT));
+	memset(g_CpuContexts, 0, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)));
 	BOOLEAN result = FALSE;
 	for (unsigned long i = 0; i < CpuCount; i++)
 	{
@@ -389,15 +367,16 @@ BOOLEAN CreatePowerCallback(PVOID PowerCallback)
 VOID PowerNotifyCallback(PVOID Context, PVOID Argument1, PVOID Argument2)
 {
 	UNREFERENCED_PARAMETER(Context);
-	UNREFERENCED_PARAMETER(Argument1);
-	UNREFERENCED_PARAMETER(Argument2);
-	if (g_SuspendGuest == FALSE)
+	if ((UINT64)Argument1 == PO_CB_SYSTEM_STATE_LOCK)
 	{
-		SuspendAllGuest();
-	}
-	else if(g_SuspendGuest == TRUE)
-	{
-		ResumeAllGuest();
+		if ((UINT64)Argument2 == FALSE)
+		{
+			SuspendAllGuest();
+		}
+		else if ((UINT64)Argument2 == TRUE)
+		{
+			ResumeAllGuest();
+		}
 	}
 }
 NTSTATUS VmStartWorker(PVOID context)
@@ -417,30 +396,21 @@ NTSTATUS VmStartWorker(PVOID context)
 	}
 	InitializeListHead(&HookListHead);
 	KeInitializeSpinLock(&HookListLock);
-	PHOOK_INFO shadowDataInfo = AddHookInfo(&HookListHead, NULL, (UINT64)&ShadowStart, SHADOW_SIZE, &HookListLock);
-	if(!shadowDataInfo) 
+	KeInitializeSpinLock(&g_HyperCallbackListLock);
+	KeInitializeSpinLock(&g_CpuidCallbackListLock);
+	KeInitializeSpinLock(&g_BpCallbackListLock);
+	for (size_t i = 0; i < CpuCount; i++)
 	{
-		DbgPrintEx(77, 0, "[-]Failed to add hook info for shadow data.\n");
-		KeBugCheckEx(0x3B, 0, 0, 0, 0);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)&ShadowStart, GET_PAGE_ALIGN_LENGTH(SHADOW_SIZE), TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].GuestVmcb.VirtualAddress, g_CpuContexts[i].GuestVmcb.Size, TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostVmcb.VirtualAddress, g_CpuContexts[i].HostVmcb.Size, TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostStack.VirtualAddress, g_CpuContexts[i].HostStack.Size, TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Hsave.VirtualAddress, g_CpuContexts[i].Hsave.Size, TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Iopm.VirtualAddress, g_CpuContexts[i].Iopm.Size, FALSE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Msrpm.VirtualAddress, g_CpuContexts[i].Msrpm.Size, FALSE, TRUE, FALSE);
 	}
-	shadowDataInfo->DataPage = TRUE;
-	if (!CreateShadowPage(shadowDataInfo, 0)) KeBugCheckEx(0x3B, 0, 0, 0, 0);
-	PUCHAR shadowData = ExAllocatePool2(POOL_FLAG_NON_PAGED, SHADOW_SIZE, 'Sodw');
-	if (!shadowData)
-	{
-		DbgPrintEx(77, 0, "[-]Failed to allocate shadow data.\n");
-		KeBugCheckEx(0x3B, 0, 0, 0, 0);
-	}
-	memset(shadowData, 0, SHADOW_SIZE);
-	ShadowCopyMemory(shadowDataInfo, 0, (UINT64)&ShadowStart, shadowData, SHADOW_SIZE);
-	ExFreePoolWithTag(shadowData, 'Sodw');
-	for (UINT32 i = 0; i < CpuCount; i++)
-	{
-		if (SetGuestShadowPage(&(g_CpuContexts[i]), shadowDataInfo, 0, TRUE, FALSE, NULL))
-		{
-			DbgPrintEx(77, 0, "[+]successed to set data shadow page for CPU %d.\n", i);
-		}
-	}
+	g_ReadMemoryTable[0] = &g_ResetShadowPageThreadObject;
 	PHOOK_INFO protectEntry = AddHookInfo(&HookListHead, NULL, (UINT64)EntryStartAddr, ENTRY_SECTION_SIZE, &HookListLock);
 	if (protectEntry)
 	{
@@ -565,7 +535,12 @@ NTSTATUS VmStartWorker(PVOID context)
 	{
 		KeBugCheckEx(0x3B, 0, 0, 0, 0);
 	}
+	for (UINT32 i = 0; i < CpuCount; i++)
+	{
+		g_CpuContexts[i].Running = TRUE;
+	}
 	CreateResetShadowPageCallback();
+	g_SuspendGuest = FALSE;
 	g_bSvmRunning = TRUE;
 	if (g_Unload)
 	{
@@ -578,18 +553,7 @@ NTSTATUS VmStartWorker(PVOID context)
 	if (g_bDebug)
 	{
 #ifdef DBG
-		HANDLE hThread = NULL;
-		for (int i = 0; i < 10; i++)
-		{
-			OBJECT_ATTRIBUTES objAttr = { 0 };
-			InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-			PsCreateSystemThread(&hThread, THREAD_ALL_ACCESS, &objAttr, NULL, NULL, (PKSTART_ROUTINE)MyCallback, NULL);
-			if (hThread)
-			{
-				ZwClose(hThread);
-				hThread = NULL;
-			}
-		}
+		DbgPrintEx(77, 0, "[*]ResetShadowThreadObject address: %llX\n", HvReadMemory(0));
 #endif
 	}
 	return STATUS_SUCCESS;
@@ -599,9 +563,9 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 	UNREFERENCED_PARAMETER(DriverObject);
 	if (!g_Unload) KeBugCheck(SYSTEM_SERVICE_EXCEPTION);
 	g_VmStart = FALSE;
+	g_bSvmRunning = FALSE;
 	KeWaitForSingleObject(g_ResetShadowPageThreadObject, Executive, KernelMode, FALSE, NULL);
 	ObDereferenceObject(g_ResetShadowPageThreadObject);
-	g_bSvmRunning = FALSE;
 	for (UINT32 i = 0; i < CpuCount; i++)
 	{
 		GROUP_AFFINITY affinity = { 0 }, oldAffinity = { 0 };
@@ -610,10 +574,12 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 		affinity.Group = processorNumber.Group;
 		affinity.Mask = 1ULL << processorNumber.Number;
 		KeSetSystemGroupAffinityThread(&affinity, &oldAffinity);
-		KIRQL oldIrql = KeRaiseIrqlToDpcLevel();
-		__svm_vmmcall(VMMCALL_SUSPEND);
+		g_CpuContexts[i].Running = FALSE;
+		__svm_vmmcall(VMMCALL_SUSPEND,0,0);
+		_disable();
+		__svm_stgi();
 		__writemsr(MSR_EFER, __readmsr(MSR_EFER) & ~EFER_SVME);
-		KeLowerIrql(oldIrql);
+		_enable();
 		KeRevertToUserGroupAffinityThread(&oldAffinity);
 	}
 	MmUnlockPages(g_Mdl);
@@ -667,6 +633,33 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 	__svm_vmload(context->HostVmcb.PhysicalAddress.QuadPart);
 	switch (exitCode)
 	{
+	case VMEXIT_MSR:
+	{
+		UINT32 msr = (Regs->rcx & 0xFFFFFFFF);
+		BOOLEAN writeAccess = (GuestVmcbVa->ControlArea.ExitInfo1 != 0);
+		ULARGE_INTEGER value = { 0 };
+		value.LowPart = (GuestVmcbVa->StateSaveArea.Rax & 0xFFFFFFFF);
+		value.HighPart = (Regs->rdx & 0xFFFFFFFF);
+		if (writeAccess != FALSE)
+		{
+			if (msr == MSR_EFER)
+			{
+				GuestVmcbVa->StateSaveArea.Efer = (value.QuadPart | EFER_SVME);
+				goto Msr_Exit;
+			}
+			__writemsr(msr, value.QuadPart);
+			goto Msr_Exit;
+		}
+		else
+		{
+			value.QuadPart = __readmsr(msr);
+			GuestVmcbVa->StateSaveArea.Rax = value.LowPart;
+			Regs->rdx = value.HighPart;
+		}
+	Msr_Exit:
+		GuestVmcbVa->StateSaveArea.Rip = GuestVmcbVa->ControlArea.NRip;
+		break;
+	}
 	case VMEXIT_VMMCALL:
 	{
 		UINT8 guestCpl = GuestVmcbVa->StateSaveArea.Cpl;
@@ -715,6 +708,30 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 			GuestVmcbVa->StateSaveArea.Rip = GuestVmcbVa->ControlArea.NRip;
 			break;
 		}
+		if (GuestVmcbVa->StateSaveArea.Rax == HV_VMMCALL_READMEMORY)
+		{
+			if (Regs->rdx == context->Token.VmmcallCookie && context->Token.Valid)
+			{
+				context->Token.Valid = FALSE;
+				context->Token.VmmcallCookie = 0;
+				context->Token.Tsc = 0;
+				GuestVmcbVa->StateSaveArea.Rax = 0;
+				if (Regs->r8 < MAX_READ)
+				{
+					GuestVmcbVa->StateSaveArea.Rax = DEF_PTR(UINT64, g_ReadMemoryTable[Regs->r8], 0);
+				}
+			}
+			else GuestVmcbVa->StateSaveArea.Rax = 0;
+			GuestVmcbVa->StateSaveArea.Rip = GuestVmcbVa->ControlArea.NRip;
+			break;
+		}
+		for (UINT32 i = 0; i < MAX_CALLBACK_COUNT; i++)
+		{
+			if (g_HyperCallbackList[i])
+			{
+				g_HyperCallbackList[i](context, Regs);
+			}
+		}
 		GuestVmcbVa->StateSaveArea.Rip = GuestVmcbVa->ControlArea.NRip;
 		break;
 	}
@@ -725,11 +742,19 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 	}
 	case VMEXIT_SHUTDOWN:
 	{
-		//DbgPrintEx(77, 0, "[-]触发三重故障，Rip：0x%llX\n", GuestVmcbVa->StateSaveArea.Rip);
 		KeBugCheckEx(0x3B, VMEXIT_SHUTDOWN, GuestVmcbVa->StateSaveArea.Rip, GuestVmcbVa->ControlArea.ExitInfo1, GuestVmcbVa->ControlArea.ExitInfo2);
 	}
 	case VMEXIT_EXCP_BP:
 	{
+		if (((GuestVmcbVa->StateSaveArea.Rip > (UINT64)hook_test && GuestVmcbVa->StateSaveArea.Rip <= (UINT64)HookEnd) || (GuestVmcbVa->StateSaveArea.Rip>(UINT64)EntryStartAddr && GuestVmcbVa->StateSaveArea.Rip <=(UINT64)EndEntryAddr)) && GuestVmcbVa->StateSaveArea.Rax == HV_VMMCALL_READMEMORY)
+		{
+			_rdrand64_step((PUINT64) & (context->Token.VmmcallCookie));
+			context->Token.Valid = TRUE;
+			context->Token.Tsc = __rdtsc();
+			GuestVmcbVa->StateSaveArea.Rax = context->Token.VmmcallCookie;
+			GuestVmcbVa->StateSaveArea.Rip += 1;
+			break;
+		}
 		PHOOK_INFO hookInfo = NULL;
 		hookInfo = EnumNextHookInfo(&HookListHead, hookInfo, NULL);
 		BOOLEAN handled = FALSE;
@@ -753,39 +778,28 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 			GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCodeValid = 0;
 		}
 		else GuestVmcbVa->StateSaveArea.Rip += 1;
+		for (UINT32 i = 0; i < MAX_CALLBACK_COUNT; i++)
+		{
+			if (g_BpCallbackList[i])
+			{
+				g_BpCallbackList[i](context, Regs);
+			}
+		}
 		break;
 	}
 #define VMEXIT_NPF 0x400
-	case VMEXIT_EXCP_PF:
-	{
-		UINT64 errcode = GuestVmcbVa->ControlArea.ExitInfo1;
-		GuestVmcbVa->ControlArea.EventInj.Bits.Valid = 1;
-		GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCodeValid = 1;
-		GuestVmcbVa->ControlArea.EventInj.Bits.Vector = 14;
-		GuestVmcbVa->ControlArea.EventInj.Bits.Type = 3;
-		GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCode = errcode;
-		break;
-	}
 	case VMEXIT_NPF:
 	{
-		UINT64 faultGPA = GuestVmcbVa->ControlArea.ExitInfo2;
 		PAGE_FAULT_EXIT_INFO exitInfo1 = { 0 };
 		exitInfo1.ErrorCode = GuestVmcbVa->ControlArea.ExitInfo1;
 		if (!exitInfo1.Fields.Present)
 		{
-			if (!UpdateNpt(context,faultGPA, &exitInfo1))
-			{
-				UINT64 errcode = GuestVmcbVa->ControlArea.ExitInfo1;
-				GuestVmcbVa->ControlArea.EventInj.Bits.Valid = 1;
-				GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCodeValid = 1;
-				GuestVmcbVa->ControlArea.EventInj.Bits.Vector = 14;
-				GuestVmcbVa->ControlArea.EventInj.Bits.Type = 3;
-				GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCode = errcode;
-			}
-			else
-			{
-				if(g_bDebug) DbgPrintEx(77, 0, "[NPF] 动态映射 GPA: 0x%llX\n", faultGPA);
-			}
+			UINT64 errcode = GuestVmcbVa->ControlArea.ExitInfo1;
+			GuestVmcbVa->ControlArea.EventInj.Bits.Valid = 1;
+			GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCodeValid = 1;
+			GuestVmcbVa->ControlArea.EventInj.Bits.Vector = 14;
+			GuestVmcbVa->ControlArea.EventInj.Bits.Type = 3;
+			GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCode = (errcode & 0x1F);
 		}
 		else
 		{
@@ -813,24 +827,22 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 			}
 			if (exitInfo1.Fields.Write)
 			{
-				if (((GpaToHpa(context, GuestVmcbVa->ControlArea.ExitInfo2) == (UINT64)(MmGetPhysicalAddress((PVOID) & g_SuspendGuest).QuadPart)) ||
-					(GpaToHpa(context, GuestVmcbVa->ControlArea.ExitInfo2) == (UINT64)(MmGetPhysicalAddress((PVOID) & g_bSvmRunning).QuadPart)) || 
-					(GpaToHpa(context, GuestVmcbVa->ControlArea.ExitInfo2) == (UINT64)(MmGetPhysicalAddress((PVOID)&g_VmStart).QuadPart)))
+				if (((GpaToHpa(context, GuestVmcbVa->ControlArea.ExitInfo2) == (UINT64)(MmGetPhysicalAddress((PVOID)&g_VmStart).QuadPart)))
 					&& (GuestVmcbVa->StateSaveArea.Rip > (UINT64)EntryStartAddr && GuestVmcbVa->StateSaveArea.Rip < (UINT64)EndEntryAddr))
 				{
-					if (g_SuspendGuest == FALSE || g_bSvmRunning==TRUE || g_VmStart==TRUE)
+					if (g_VmStart==TRUE)
 					{
-						if ((GpaToHpa(context, GuestVmcbVa->ControlArea.ExitInfo2) == (UINT64)(MmGetPhysicalAddress((PVOID) & g_SuspendGuest).QuadPart)))
+						g_VmStart = FALSE;
+						for (UINT32 i = 0; i < CpuCount; i++)
 						{
-							g_SuspendGuest = TRUE;
-						}
-						if ((GpaToHpa(context, GuestVmcbVa->ControlArea.ExitInfo2) == (UINT64)(MmGetPhysicalAddress((PVOID) & g_bSvmRunning).QuadPart)))
-						{
-							g_bSvmRunning = FALSE;
-						}
-						if ((GpaToHpa(context, GuestVmcbVa->ControlArea.ExitInfo2) == (UINT64)(MmGetPhysicalAddress((PVOID)&g_VmStart).QuadPart)))
-						{
-							g_VmStart = FALSE;
+							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), FALSE, FALSE, TRUE);
+							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)&ShadowStart, GET_PAGE_ALIGN_LENGTH(SHADOW_SIZE), FALSE, FALSE, TRUE);
+							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].GuestVmcb.VirtualAddress, g_CpuContexts[i].GuestVmcb.Size, FALSE, FALSE, TRUE);
+							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostVmcb.VirtualAddress, g_CpuContexts[i].HostVmcb.Size, FALSE, FALSE, TRUE);
+							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostStack.VirtualAddress, g_CpuContexts[i].HostStack.Size, FALSE, FALSE, TRUE);
+							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Hsave.VirtualAddress, g_CpuContexts[i].Hsave.Size, FALSE, FALSE, TRUE);
+							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Iopm.VirtualAddress, g_CpuContexts[i].Iopm.Size, FALSE, FALSE, TRUE);
+							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Msrpm.VirtualAddress, g_CpuContexts[i].Msrpm.Size, FALSE, FALSE, TRUE);
 						}
 						memset(IsVirtualCpu, 0, MAX_SVM_THREADS);
 						PHOOK_INFO hookInfo = NULL;
@@ -884,7 +896,12 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 	}
 	default:
 	{
-		KeBugCheck(0x3B);
+		if(g_bDebug) __debugbreak();
+		GuestVmcbVa->ControlArea.EventInj.Bits.Valid = 1;
+		GuestVmcbVa->ControlArea.EventInj.Bits.Type = 3;
+		GuestVmcbVa->ControlArea.EventInj.Bits.Vector = 13;
+		GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCode = 0;
+		GuestVmcbVa->ControlArea.EventInj.Bits.ErrorCodeValid = 1;
 		break;
 	}
 	}
@@ -898,6 +915,8 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 #pragma comment(linker, "/SECTION:.vmexit,ER,ALIGN=4096")
 __forceinline void SuspendAllGuest()
 {
+
+	g_VmStart = FALSE;
 	g_SuspendGuest = TRUE;
 	for (UINT32 i = 0; i < CpuCount; i++)
 	{
@@ -907,10 +926,14 @@ __forceinline void SuspendAllGuest()
 		affinity.Group = processorNumber.Group;
 		affinity.Mask = 1ULL << processorNumber.Number;
 		KeSetSystemGroupAffinityThread(&affinity, &oldAffinity);
-		__svm_vmmcall(VMMCALL_SUSPEND);
-		__writemsr(MSR_EFER, __readmsr(MSR_EFER) & ~EFER_SVME);
+		g_CpuContexts[i].Running = FALSE;
+		__svm_vmmcall(VMMCALL_SUSPEND,0,0);
+		_disable();
 		PVMCB vmcb = (PVMCB)g_CpuContexts[i].GuestVmcb.VirtualAddress;
 		vmcb->ControlArea.VmcbClean = 0;
+		__svm_stgi();
+		__writemsr(MSR_EFER, __readmsr(MSR_EFER) & ~EFER_SVME);
+		_enable();
 		KeRevertToUserGroupAffinityThread(&oldAffinity);
 	}
 }
@@ -918,8 +941,20 @@ __forceinline void ResumeAllGuest()
 {
 	PCPU_CONTEXT contexts = g_CpuContexts;
 	PHOOK_INFO funcHookInfo = NULL;
-	g_bSvmRunning = TRUE;
 	g_VmStart = TRUE;
+	g_SuspendGuest = FALSE;
+	g_bSvmRunning = TRUE;
+	for (size_t i = 0; i < CpuCount; i++)
+	{
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)&ShadowStart, GET_PAGE_ALIGN_LENGTH(SHADOW_SIZE), TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].GuestVmcb.VirtualAddress, g_CpuContexts[i].GuestVmcb.Size, TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostVmcb.VirtualAddress, g_CpuContexts[i].HostVmcb.Size, TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostStack.VirtualAddress, g_CpuContexts[i].HostStack.Size, TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Hsave.VirtualAddress, g_CpuContexts[i].Hsave.Size, TRUE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Iopm.VirtualAddress, g_CpuContexts[i].Iopm.Size, FALSE, TRUE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Msrpm.VirtualAddress, g_CpuContexts[i].Msrpm.Size, FALSE, TRUE, FALSE);
+	}
 	funcHookInfo = EnumNextHookInfo(&HookListHead, funcHookInfo, NULL);
 	while (funcHookInfo)
 	{
@@ -933,7 +968,6 @@ __forceinline void ResumeAllGuest()
 		funcHookInfo = EnumNextHookInfo(&HookListHead, funcHookInfo, NULL);
 	}
 	PHOOK_INFO hookInfo = NULL;
-	g_SuspendGuest = FALSE;
 	hookInfo = FindHookInfoPageBase(&HookListHead, (UINT64)&g_SuspendGuest, &HookListLock);
 	if (hookInfo)
 	{
@@ -947,13 +981,16 @@ __forceinline void ResumeAllGuest()
 		PCPU_CONTEXT cpuContext = &(contexts[i]);
 		GROUP_AFFINITY affinity = { 0 }, oldAffinity = { 0 };
 		PROCESSOR_NUMBER processorNumber = { 0 };
-		KeGetProcessorNumberFromIndex(cpuContext->CpuIndex, &processorNumber);
+		KeGetProcessorNumberFromIndex(i, &processorNumber);
 		affinity.Group = processorNumber.Group;
 		affinity.Mask = 1ULL << processorNumber.Number;
 		KeSetSystemGroupAffinityThread(&affinity, &oldAffinity);
-		memset(&(cpuContext->ThreadContext), 0, sizeof(CONTEXT));
-		RtlCaptureContext(&(cpuContext->ThreadContext));
-		if (!CheckIsVirtualCpu(cpuContext->CpuIndex))
+		cpuContext->Running = TRUE;
+		UINT32 index = cpuContext->CpuIndex;
+		PCONTEXT threadctx = (PCONTEXT) & (cpuContext->ThreadContext);
+		memset(threadctx, 0, sizeof(CONTEXT));
+		RtlCaptureContext(threadctx);
+		if (!CheckIsVirtualCpu(index))
 		{
 			StartSVM(cpuContext);
 		}

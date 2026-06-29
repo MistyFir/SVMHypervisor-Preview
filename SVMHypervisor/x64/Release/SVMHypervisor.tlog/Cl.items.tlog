@@ -1,7 +1,0 @@
-D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\CPUID.c;D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\x64\Release\CPUID.obj
-D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\driver.c;D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\x64\Release\driver.obj
-D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\export_func.c;D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\x64\Release\export_func.obj
-D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\Hook.c;D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\x64\Release\Hook.obj
-D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\PTE.c;D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\x64\Release\PTE.obj
-D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\VMCB.c;D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\x64\Release\VMCB.obj
-D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\X64Diasm.c;D:\C\Projects\SVMHypervisor-Preview\SVMHypervisor\x64\Release\X64Diasm.obj

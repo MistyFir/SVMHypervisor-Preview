@@ -5,6 +5,7 @@ KSPIN_LOCK PageListLock = { 0 };
 #pragma code_seg(".entry$002")
 BOOLEAN InitPageList()
 {
+	KeInitializeSpinLock(&PageListLock);
 	BOOLEAN result = TRUE;
 	for (UINT32 i = 0; i < MAX_POOL_PAGES; i++)
 	{
@@ -132,23 +133,31 @@ BOOLEAN CreateSvmPageTable(PCPU_CONTEXT CpuContext)
 			DbgPrintEx(77, 0, "[-]failed to Allocate PDPT\n");
 			break;
 		}
-		if (!AllocateNptPageTable(&(CpuContext->PageTableInfo.PD), 512*PAGE_SIZE))
+		BOOLEAN pdResult = TRUE;
+		for (size_t i = 0; i < 512; i++)
 		{
-			DbgPrintEx(77, 0, "[-]failed to Allocate PD\n");
-			break;
+			if (!AllocateNptPageTable(&(CpuContext->PageTableInfo.PD[i]), PAGE_SIZE))
+			{
+				DbgPrintEx(77, 0, "[-]failed to Allocate PD\n");
+				pdResult = FALSE;
+				break;
+			}
 		}
+		if (!pdResult) break;
 		result = TRUE;
 	} while (FALSE);
 	if (!result)
 	{
 		FreeNptPageTable(&CpuContext->PageTableInfo.PML4);
 		FreeNptPageTable(&CpuContext->PageTableInfo.PDPT);
-		FreeNptPageTable(&CpuContext->PageTableInfo.PD);
+		for (size_t i = 0; i < 512; i++)
+		{
+			FreeNptPageTable(&CpuContext->PageTableInfo.PD[i]);
+		}
 		return result;
 	}
 	PPML4_ENTRY_4KB pml4 = (PPML4_ENTRY_4KB)CpuContext->PageTableInfo.PML4.VirtualAddress;
 	PPDP_ENTRY_4KB pdpt = (PPDP_ENTRY_4KB)CpuContext->PageTableInfo.PDPT.VirtualAddress;
-	PPD_ENTRY_2MB pd_base = (PPD_ENTRY_2MB)CpuContext->PageTableInfo.PD.VirtualAddress;
 	pml4[0].AsUInt64 = 0;
 	pml4[0].Bits.Valid = 1;
 	pml4[0].Bits.Accessed = 1;
@@ -162,18 +171,22 @@ BOOLEAN CreateSvmPageTable(PCPU_CONTEXT CpuContext)
 		pdpt[i].Bits.Valid = 1;
 		pdpt[i].Bits.Write = 1;
 		pdpt[i].Bits.User = 1;
-		pdpt[i].Bits.PageFrameNumber = (CpuContext->PageTableInfo.PD.PhysicalAddress.QuadPart >> 12) + i;
+		pdpt[i].Bits.PageFrameNumber = CpuContext->PageTableInfo.PD[i].PhysicalAddress.QuadPart >> 12;
 	}
-	for (int i = 0; i < 512 * 512; i++)
+	for (size_t i = 0; i < 512; i++)
 	{
-		pd_base[i].AsUInt64 = 0;
-		pd_base[i].Bits.Accessed = 1;
-		pd_base[i].Bits.Valid = 1;
-		pd_base[i].Bits.Write = 1;
-		pd_base[i].Bits.User = 1;
-		pd_base[i].Bits.LargePage = 1;
-		pd_base[i].Bits.Dirty = 1;
-		pd_base[i].Bits.PageFrameNumber = i;
+		PPD_ENTRY_2MB pd_base = (PPD_ENTRY_2MB)CpuContext->PageTableInfo.PD[i].VirtualAddress;
+		for (size_t j = 0; j < 512; j++)
+		{
+			pd_base[j].AsUInt64 = 0;
+			pd_base[j].Bits.Accessed = 1;
+			pd_base[j].Bits.Valid = 1;
+			pd_base[j].Bits.Write = 1;
+			pd_base[j].Bits.User = 1;
+			pd_base[j].Bits.Dirty = 1;
+			pd_base[j].Bits.PageFrameNumber = i * 512 + j;
+			pd_base[j].Bits.LargePage = 1;
+		}
 	}
 	//DbgPrintEx(77, 0, "[+]InitSvmPageTable success.\n");
 	return TRUE;
@@ -301,7 +314,10 @@ void FreeSvmPageTable(PCPU_CONTEXT CpuContext)
 {
 	FreeNptPageTable(&CpuContext->PageTableInfo.PML4);
 	FreeNptPageTable(&CpuContext->PageTableInfo.PDPT);
-	FreeNptPageTable(&CpuContext->PageTableInfo.PD);
+	for (size_t i = 0; i < 512; i++)
+	{
+		FreeNptPageTable(&(CpuContext->PageTableInfo.PD[i]));
+	}
 	FreeNptPageTable(&CpuContext->PageTableInfo.PT);
 }
 BOOLEAN BuildNestedPageTables1GByte(PCPU_CONTEXT CpuContext)
@@ -442,7 +458,7 @@ UINT64 GpaToHpa(PCPU_CONTEXT CpuContext, UINT64 GuestPhysicalAddress)
 		return (ptEntry[ptIndex].Fields.PageFrameNumber << 12) | (GuestPhysicalAddress - GET_4KB_PAGE_BASE(GuestPhysicalAddress));
 	}
 }
-BOOLEAN SetNestedPageProtection(PCPU_CONTEXT Context, UINT64 VirtualAddress, SIZE_T MapSize, BOOLEAN NoExecute, BOOLEAN Write)
+BOOLEAN SetNestedPageProtection(PCPU_CONTEXT Context, UINT64 VirtualAddress, SIZE_T MapSize, BOOLEAN Hide, BOOLEAN NoExecute, BOOLEAN Write)
 {
 	UINT64 mapPageSize = GET_PAGE_ALIGN_LENGTH(MapSize);
 	UINT64 pageCount = mapPageSize / PAGE_SIZE;
@@ -467,11 +483,17 @@ BOOLEAN SetNestedPageProtection(PCPU_CONTEXT Context, UINT64 VirtualAddress, SIZ
 		PPT_ENTRY_4KB ptEntry = (PPT_ENTRY_4KB)PA_TO_VA(pdEntry[pdIndex].Bits.PageFrameNumber << 12);
 		if (!ptEntry) return FALSE;
 		UINT64 ptIndex = GetPTIndex(physicalAddr);
-		if (!ptEntry[ptIndex].Fields.Valid) return FALSE;
 		PT_ENTRY_4KB tmpPt = { 0 };
 		tmpPt.AsUInt64 = ptEntry[ptIndex].AsUInt64;
 		tmpPt.Fields.Write = Write;
 		tmpPt.Fields.NoExecute = NoExecute;
+		if (Hide)
+		{
+			tmpPt.Fields.PageFrameNumber = g_ZeroPage.PhysicalAddress.QuadPart >> 12;
+			tmpPt.Fields.Write = FALSE;
+			tmpPt.Fields.NoExecute = TRUE;
+		}
+		else tmpPt.Fields.PageFrameNumber = physicalAddr >> 12;
 		_InterlockedExchange64((PLONG64) & (ptEntry[ptIndex].AsUInt64), tmpPt.AsUInt64);
 	}
 	return TRUE;

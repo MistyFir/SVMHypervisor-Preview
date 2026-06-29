@@ -14,7 +14,7 @@ PHOOK_PAGE_INFO AllocateHookPageInfo(SIZE_T PageCount)
 		memset(HookPageInfo, 0, allocSize);
 		for (UINT32 i = 0; i < CpuCount; i++)
 		{
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)HookPageInfo, allocSize, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)HookPageInfo, allocSize, TRUE, TRUE, FALSE);
 		}
 		return HookPageInfo;
 	}
@@ -27,7 +27,7 @@ VOID FreeHookPageInfo(PHOOK_PAGE_INFO HookPageInfo,SIZE_T PageCount)
 		SIZE_T allocSize = GET_PAGE_ALIGN_LENGTH(sizeof(HOOK_PAGE_INFO) * PageCount);
 		for (UINT32 i = 0; i < CpuCount; i++)
 		{
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)HookPageInfo, allocSize, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)HookPageInfo, allocSize, FALSE, TRUE, FALSE);
 		}
 		ExFreePoolWithTag(HookPageInfo, HOOK_POOL);
 	}
@@ -87,14 +87,14 @@ PHOOK_INFO AddHookInfo(PLIST_ENTRY ListHead, PCSTR TagStr, UINT64 VirtualAddress
 	BOOLEAN result = FALSE;
 	for (UINT32 i = 0; i < CpuCount; i++)
 	{
-		result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)hookInfo, hookInfoSize, TRUE, FALSE);
+		result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)hookInfo, hookInfoSize, TRUE, TRUE, FALSE);
 		if (!result) break;
 	}
 	if (!result)
 	{
 		for (UINT32 i = 0; i < CpuCount; i++)
 		{
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)hookInfo, hookInfoSize, FALSE, TRUE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)hookInfo, hookInfoSize, TRUE, FALSE, TRUE);
 		}
 		ExFreePoolWithTag(hookInfo, HOOK_POOL);
 		return NULL;
@@ -191,6 +191,10 @@ BOOLEAN CreateShadowPage(PHOOK_INFO HookInfo, UINT32 ShadowPageIndex)
 			break;
 		}
 		memcpy(HookInfo->HookPageInfo[i].ShadowPageBaseInfo[ShadowPageIndex].VirtualAddress, HookInfo->HookPageInfo[i].PageBaseInfo.VirtualAddress, PAGE_SIZE);
+		for (UINT32 j = 0; j < CpuCount; j++)
+		{
+			SetNestedPageProtection(&(g_CpuContexts[j]), (UINT64)(HookInfo->HookPageInfo[i].ShadowPageBaseInfo[ShadowPageIndex].VirtualAddress), PAGE_SIZE, TRUE, TRUE, FALSE);
+		}
 	}
 	if (!result)
 	{
@@ -365,7 +369,7 @@ void RemoveHookInfo(PLIST_ENTRY ListHead, PHOOK_INFO HookInfo, PKSPIN_LOCK HookL
 	for (UINT32 i = 0; i < CpuCount; i++)
 	{
 		SetGuestShadowPage(&(g_CpuContexts[i]), tmpInfo, NO_SHADOW_PAGE, FALSE, TRUE, NULL);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)tmpInfo, GET_PAGE_ALIGN_LENGTH(tmpInfo->CbSize), FALSE, TRUE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)tmpInfo, GET_PAGE_ALIGN_LENGTH(tmpInfo->CbSize), FALSE, FALSE, TRUE);
 	}
 	for (int j = 0; j < MAX_SHADOW_PAGE; j++) {
 		FreeGuestShadowPage(tmpInfo, j);
@@ -386,7 +390,7 @@ PHOOK_FUNC_INFO AddHookFuncInfo(PHOOK_INFO hookInfo, UINT64 OriginalFuncAddress,
 	funcInfo->FuncLength = FuncLength;
 	for (UINT32 i = 0; i < CpuCount; i++)
 	{
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)funcInfo,funcInfoPageSize,TRUE,FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)funcInfo, funcInfoPageSize, TRUE, TRUE, FALSE);
 	}
 	ExInterlockedInsertHeadList(&hookInfo->HookFuncList.HookFuncListHead, &funcInfo->HookFuncList, &hookInfo->HookFuncList.HookFuncListLock);
 	return funcInfo;
@@ -468,7 +472,7 @@ void RemoveHookFuncInfo(PHOOK_INFO hookInfo, PHOOK_FUNC_INFO funcInfo,BOOLEAN Lo
 	FreeJmpTrampoline(tmpInfo);
 	for (UINT32 i = 0; i < CpuCount; i++)
 	{
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)tmpInfo, GET_PAGE_ALIGN_LENGTH(sizeof(HOOK_FUNC_INFO)), FALSE, TRUE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)tmpInfo, GET_PAGE_ALIGN_LENGTH(sizeof(HOOK_FUNC_INFO)), FALSE, FALSE, TRUE);
 	}
 	ExFreePoolWithTag(tmpInfo, HOOK_POOL);
 }
@@ -571,7 +575,7 @@ PVOID AllocateJmpTrampoline(PHOOK_FUNC_INFO HookFuncInfo,SIZE_T Length)
 	HookFuncInfo->JumpTrampolineSize = alignLength;
 	for (UINT32 i = 0; i < CpuCount; i++)
 	{
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)pJmpTrampoline, alignLength, FALSE, FALSE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)pJmpTrampoline, alignLength, FALSE, FALSE, FALSE);
 	}
 	return pJmpTrampoline;
 }
@@ -584,7 +588,7 @@ void FreeJmpTrampoline(PHOOK_FUNC_INFO HookFuncInfo)
 	HookFuncInfo->JumpTrampolineSize = 0;
 	for (UINT32 i = 0; i < CpuCount; i++)
 	{
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)pJmpTrampoline, length, FALSE, TRUE);
+		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)pJmpTrampoline, length, FALSE, FALSE, TRUE);
 	}
 	ExFreePoolWithTag(pJmpTrampoline, JMP_POOL);
 }

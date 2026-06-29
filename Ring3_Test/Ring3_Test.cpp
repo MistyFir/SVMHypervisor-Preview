@@ -20,7 +20,7 @@ VOID MyThread(PVOID lpParam)
 		OBJECT_ATTRIBUTES objAttr = { 0 };
 		InitializeObjectAttributes(&objAttr, NULL, NULL, NULL, NULL);
 		MY_CLIENT_ID clientId = { 0 };
-		clientId.UniqueProcess = (HANDLE)0x29BC;
+		clientId.UniqueProcess = (HANDLE)0x1438;
 		clientId.UniqueThread = NULL;
 		NTSTATUS status = g_NtOpenProcess(&hProcess, PROCESS_TERMINATE, &objAttr, &clientId);
 		if (status == 0)
