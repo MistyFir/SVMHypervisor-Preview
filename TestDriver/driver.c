@@ -152,21 +152,14 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 		if (inputLength >= sizeof(WRITE_MEMORY_INFO))
 		{
 			PWRITE_MEMORY_INFO info = (PWRITE_MEMORY_INFO)Irp->AssociatedIrp.SystemBuffer;
-			WRITE_MEMORY_INFO tmpInfo = { 0 };
-			memcpy(&tmpInfo, info, sizeof(tmpInfo));
-			_disable();
-			UINT64 cr0 = __readcr0();
-			__writecr0(cr0 & ~CR0_WP);
 			__try
 			{
-				memcpy(tmpInfo.Address, tmpInfo.InputBuffer, tmpInfo.InputBufferSize);
+				memcpy(info->Address, info->InputBuffer, info->InputBufferSize);
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER)
 			{
 				status = GetExceptionCode();
 			}
-			__writecr0(cr0);
-			_enable();
 			Irp->IoStatus.Information = 0;
 		}
 		else status = STATUS_BUFFER_TOO_SMALL;

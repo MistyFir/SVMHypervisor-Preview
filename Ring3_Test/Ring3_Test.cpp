@@ -194,11 +194,20 @@ int main()
 				cout << "Enter address to write: " << endl;
 				cin >> std::hex >> address;
 				CinClear();
+				UINT64 length = 0;
+				cout << "Enter length to write(1/2/4/8): " << endl;
+				cin >> std::dec >> length;
+				length &= 0xFF;
+				if (length != 1 && length != 2 && length != 4 && length != 8)
+				{
+					cout << "Invalid length! " << endl;
+					break;
+				}
 				UINT64 value = 0;
 				cout << "Enter value to write: " << endl;
 				cin >> std::hex >> value;
 				CinClear();
-				if (!KernelWriteMemory(hDevice, (PVOID)address, &value, sizeof(value)))
+				if (!KernelWriteMemory(hDevice, (PVOID)address, &value, length))
 				{
 					cout << "Write Memory Failed! errcode: "<< GetLastError() << endl;
 				}

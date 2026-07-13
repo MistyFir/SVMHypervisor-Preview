@@ -402,12 +402,15 @@ NTSTATUS VmStartWorker(PVOID context)
 	{
 		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), TRUE, TRUE, FALSE);
 		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)&ShadowStart, GET_PAGE_ALIGN_LENGTH(SHADOW_SIZE), TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].GuestVmcb.VirtualAddress, g_CpuContexts[i].GuestVmcb.Size, TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostVmcb.VirtualAddress, g_CpuContexts[i].HostVmcb.Size, TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostStack.VirtualAddress, g_CpuContexts[i].HostStack.Size, TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Hsave.VirtualAddress, g_CpuContexts[i].Hsave.Size, TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Iopm.VirtualAddress, g_CpuContexts[i].Iopm.Size, FALSE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Msrpm.VirtualAddress, g_CpuContexts[i].Msrpm.Size, FALSE, TRUE, FALSE);
+		for (size_t j = 0; j < CpuCount; j++)
+		{
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].GuestVmcb.VirtualAddress, g_CpuContexts[j].GuestVmcb.Size, TRUE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostVmcb.VirtualAddress, g_CpuContexts[j].HostVmcb.Size, TRUE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostStack.VirtualAddress, g_CpuContexts[j].HostStack.Size, TRUE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Hsave.VirtualAddress, g_CpuContexts[j].Hsave.Size, TRUE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Iopm.VirtualAddress, g_CpuContexts[j].Iopm.Size, FALSE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Msrpm.VirtualAddress, g_CpuContexts[j].Msrpm.Size, FALSE, TRUE, FALSE);
+		}
 		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)IsVirtualCpu, GET_PAGE_ALIGN_LENGTH(sizeof(IsVirtualCpu)), FALSE, TRUE, FALSE);
 	}
 	g_ReadMemoryTable[0] = &g_ResetShadowPageThreadObject;
@@ -879,12 +882,15 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 						{
 							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), FALSE, FALSE, TRUE);
 							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)&ShadowStart, GET_PAGE_ALIGN_LENGTH(SHADOW_SIZE), FALSE, FALSE, TRUE);
-							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].GuestVmcb.VirtualAddress, g_CpuContexts[i].GuestVmcb.Size, FALSE, FALSE, TRUE);
-							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostVmcb.VirtualAddress, g_CpuContexts[i].HostVmcb.Size, FALSE, FALSE, TRUE);
-							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostStack.VirtualAddress, g_CpuContexts[i].HostStack.Size, FALSE, FALSE, TRUE);
-							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Hsave.VirtualAddress, g_CpuContexts[i].Hsave.Size, FALSE, FALSE, TRUE);
-							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Iopm.VirtualAddress, g_CpuContexts[i].Iopm.Size, FALSE, FALSE, TRUE);
-							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Msrpm.VirtualAddress, g_CpuContexts[i].Msrpm.Size, FALSE, FALSE, TRUE);
+							for (size_t j = 0; j < CpuCount; j++)
+							{
+								SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].GuestVmcb.VirtualAddress, g_CpuContexts[j].GuestVmcb.Size, FALSE, FALSE, TRUE);
+								SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostVmcb.VirtualAddress, g_CpuContexts[j].HostVmcb.Size, FALSE, FALSE, TRUE);
+								SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostStack.VirtualAddress, g_CpuContexts[j].HostStack.Size, FALSE, FALSE, TRUE);
+								SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Hsave.VirtualAddress, g_CpuContexts[j].Hsave.Size, FALSE, FALSE, TRUE);
+								SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Iopm.VirtualAddress, g_CpuContexts[j].Iopm.Size, FALSE, FALSE, TRUE);
+								SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Msrpm.VirtualAddress, g_CpuContexts[j].Msrpm.Size, FALSE, FALSE, TRUE);
+							}
 							SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)IsVirtualCpu, GET_PAGE_ALIGN_LENGTH(sizeof(IsVirtualCpu)), FALSE, FALSE, TRUE);
 						}
 						memset(IsVirtualCpu, 0, MAX_SVM_THREADS);
@@ -991,12 +997,15 @@ __forceinline void ResumeAllGuest()
 	{
 		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), TRUE, TRUE, FALSE);
 		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)&ShadowStart, GET_PAGE_ALIGN_LENGTH(SHADOW_SIZE), TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].GuestVmcb.VirtualAddress, g_CpuContexts[i].GuestVmcb.Size, TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostVmcb.VirtualAddress, g_CpuContexts[i].HostVmcb.Size, TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].HostStack.VirtualAddress, g_CpuContexts[i].HostStack.Size, TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Hsave.VirtualAddress, g_CpuContexts[i].Hsave.Size, TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Iopm.VirtualAddress, g_CpuContexts[i].Iopm.Size, FALSE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[i].Msrpm.VirtualAddress, g_CpuContexts[i].Msrpm.Size, FALSE, TRUE, FALSE);
+		for (size_t j = 0; j < CpuCount; j++)
+		{
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].GuestVmcb.VirtualAddress, g_CpuContexts[j].GuestVmcb.Size, TRUE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostVmcb.VirtualAddress, g_CpuContexts[j].HostVmcb.Size, TRUE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostStack.VirtualAddress, g_CpuContexts[j].HostStack.Size, TRUE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Hsave.VirtualAddress, g_CpuContexts[j].Hsave.Size, TRUE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Iopm.VirtualAddress, g_CpuContexts[j].Iopm.Size, FALSE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Msrpm.VirtualAddress, g_CpuContexts[j].Msrpm.Size, FALSE, TRUE, FALSE);
+		}
 		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)IsVirtualCpu, GET_PAGE_ALIGN_LENGTH(sizeof(IsVirtualCpu)), FALSE, TRUE, FALSE);
 	}
 	funcHookInfo = EnumNextHookInfo(&HookListHead, funcHookInfo, NULL);
