@@ -204,7 +204,7 @@ UINT8 GetInstructionLength(PVOID CodeAddr, UINT8 MaxLength);
 ```
 计算指定地址处的 x64 指令长度，用于确定需要复制的原函数序言字节数。
 - `CodeAddr`：指令起始地址。
-- `MaxLengh`：获取长度的最大限制数。
+- `MaxLength`：获取长度的最大限制数。
 
 #### SvmEnumNextHookInfo
 ```c
@@ -262,7 +262,7 @@ NTSTATUS InstallNtOpenProcessHook()
         return STATUS_NOT_FOUND;
     }
 
-    // 2. 创建 Hook 信息节点
+    // 1. 创建 Hook 信息节点
     g_NtOpenProcessHookInfo = SvmAddHookInfo(NULL, (UINT64)g_NtOpenProcessOriginal, PAGE_SIZE * 2);
     if (!g_NtOpenProcessHookInfo)
     {
@@ -270,21 +270,21 @@ NTSTATUS InstallNtOpenProcessHook()
         return STATUS_UNSUCCESSFUL;
     }
 
-    // 3. 创建 Shadow Page 0（原始页面副本）
+    // 2. 创建 Shadow Page 0（原始页面副本）
     if (!SvmCreateShadowPage(g_NtOpenProcessHookInfo, 0))
     {
         DbgPrintEx(77, 0, "[-] SvmCreateShadowPage(0) failed.\n");
         return STATUS_UNSUCCESSFUL;
     }
 
-    // 4. 创建 Shadow Page 1（Hook 页面副本）
-    if (!SvmCreateShadowPage(g_NtCloseHookInfo, 1))
+    // 3. 创建 Shadow Page 1（Hook 页面副本）
+    if (!SvmCreateShadowPage(g_NtOpenProcessHookInfo, 1))
     {
         DbgPrintEx(77, 0, "[-] SvmCreateShadowPage(1) failed.\n");
         return STATUS_UNSUCCESSFUL;
     }
 
-    // 5. 添加函数 Hook 记录
+    // 4. 添加函数 Hook 记录
     g_NtOpenProcessFuncInfo = SvmAddHookFuncInfo(
         g_NtOpenProcessHookInfo,
         (UINT64)g_NtOpenProcessOriginal,
@@ -297,7 +297,7 @@ NTSTATUS InstallNtOpenProcessHook()
         return STATUS_UNSUCCESSFUL;
     }
 
-    // 6. 分配蹦床内存
+    // 5. 分配蹦床内存
     PJMP_FUNC_TRAMPOLINE trampoline = (PJMP_FUNC_TRAMPOLINE)SvmAllocateJmpTrampoline(
         g_NtOpenProcessFuncInfo,
         (SIZE_T)SvmGetJmpCodeFuncBufferLength()
@@ -308,7 +308,7 @@ NTSTATUS InstallNtOpenProcessHook()
         return STATUS_UNSUCCESSFUL;
     }
 
-    // 7. 填充蹦床结构体
+    // 6. 填充蹦床结构体
     //    复制蹦床代码模板
     SvmGetJmpCodeFuncBuffer(trampoline,(SIZE_T)SvmGetJmpCodeFuncBufferLength());
 
@@ -320,29 +320,29 @@ NTSTATUS InstallNtOpenProcessHook()
     }
 
     //    设置蹦床偏移
-    g_NtCloseFuncInfo->JumpTrampolineOffset = sizeof(trampoline->Data);
+    g_NtOpenProcessFuncInfo->JumpTrampolineOffset = sizeof(trampoline->Data);
 
     //    设置三个关键地址
-    DEF_PTR(UINT64, trampoline->Data.HookFuncAddress, 0) = (UINT64)Hook_NtClose;
-    DEF_PTR(UINT64, trampoline->Data.CallbackAddress, 0) = (UINT64)g_NtCloseOriginal + originalCodeLen;
+    DEF_PTR(UINT64, trampoline->Data.HookFuncAddress, 0) = (UINT64)Hook_NtOpenProcess;
+    DEF_PTR(UINT64, trampoline->Data.CallbackAddress, 0) = (UINT64)g_NtOpenProcessOriginal + originalCodeLen;
     DEF_PTR(UINT64, trampoline->Data.ReturnAddress, 0) = (UINT64)trampoline + SvmGetReturnOffset();
 
     //    保存原函数序言到蹦床
-    memcpy(trampoline->Execute.OriginalCode, g_NtCloseOriginal, originalCodeLen);
+    memcpy(trampoline->Execute.OriginalCode, g_NtOpenProcessOriginal, originalCodeLen);
 
-    // 8. 在 Shadow Page 1 中用 INT3 替换原函数序言
+    // 7. 在 Shadow Page 1 中用 INT3 替换原函数序言
     UINT8 jmpCode[256] = { 0 };
     memset(jmpCode, 0x90, sizeof(jmpCode));
     jmpCode[0] = INT_3;  // INT3 断点指令
-    SvmShadowCopyMemory(g_NtCloseHookInfo, 1, (UINT64)g_NtCloseOriginal, jmpCode, originalCodeLen);
+    SvmShadowCopyMemory(g_NtOpenProcessHookInfo, 1, (UINT64)g_NtOpenProcessOriginal, jmpCode, originalCodeLen);
 
-    // 9. 对所有核心设置 Shadow Page 0 为执行页面
+    // 8. 对所有核心设置 Shadow Page 0 为执行页面
     for (UINT32 i = 0; i < CpuCount; i++)
     {
-        SvmSetGuestShadowPage(&g_CpuContexts[i], g_NtCloseHookInfo, 0, TRUE, FALSE);
+        SvmSetGuestShadowPage(&g_CpuContexts[i], g_NtOpenProcessHookInfo, 0, TRUE, FALSE);
     }
 
-    DbgPrintEx(77, 0, "[+] NtClose hook installed successfully.\n");
+    DbgPrintEx(77, 0, "[+] NtOpenProcess hook installed successfully.\n");
     return STATUS_SUCCESS;
 }
 ```
@@ -495,7 +495,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     KeDelayExecutionThread(KernelMode, FALSE, &timeout);
 
     // 安装 Hook
-    InstallNtCloseHook();
+    InstallNtOpenProcessHook();
 
     DriverObject->DriverUnload = UnloadDriver;
     return STATUS_SUCCESS;
