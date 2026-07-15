@@ -339,7 +339,7 @@ NTSTATUS InstallNtOpenProcessHook()
     // 8. 对所有核心设置 Shadow Page 0 为执行页面
     for (UINT32 i = 0; i < CpuCount; i++)
     {
-        SvmSetGuestShadowPage(&g_CpuContexts[i], g_NtOpenProcessHookInfo, 0, TRUE, FALSE);
+        SvmSetGuestShadowPage(SvmGetCpuContextIndex(i), g_NtOpenProcessHookInfo, 0, TRUE, FALSE);
     }
 
     DbgPrintEx(77, 0, "[+] NtOpenProcess hook installed successfully.\n");
@@ -452,7 +452,7 @@ dataProtect->DataPage = TRUE;  // 标记为数据页面保护
 
 for (UINT32 i = 0; i < CpuCount; i++)
 {
-    SvmSetGuestShadowPage(&g_CpuContexts[i], dataProtect, NO_SHADOW_PAGE, TRUE, FALSE);
+    SvmSetGuestShadowPage(SvmGetCpuContextIndex(i), dataProtect, NO_SHADOW_PAGE, TRUE, FALSE);
 }
 ```
 
