@@ -57,7 +57,7 @@ SVMHypervisor 是一个运行在 Windows 内核模式下、基于 AMD SVM 与嵌
 2. Hypervisor 验证目标 Hook，并将当前核心的 NPT 映射切换到 Shadow Page 1。
 3. Guest 在原函数入口执行 `INT3`，触发 `#BP` VM-Exit。
 4. Hypervisor 将 Guest RIP 改为 `JumpTrampolineAddress + JumpTrampolineOffset`。
-5. 蹦床执行原序言并调用 Hook 处理函数；返回成功时继续执行原函数剩余部分。
+5. 蹦床调用 Hook 处理函数并执行原序言，返回成功时继续执行原函数剩余部分。
 
 映射切换按 CPU 核心独立生效，修改 NPT 后必须使对应核心的 TLB 失效。
 
@@ -381,9 +381,9 @@ Guest 执行原函数地址
     v  VMM 查找 HookFuncInfo，跳转到蹦床
     |
     v  蹦床执行：
-   ├── 执行原函数序言（OriginalCode）
    ├── 跳转到 HookFuncAddress（Hook 处理函数）
    │       └── Hook 函数可通过返回值控制行为
+   ├── 执行原函数序言（OriginalCode）
    ├── 跳转到 CallbackAddress（原函数序言之后的代码）
    └── 跳转到 ReturnAddress 返回
 ```
