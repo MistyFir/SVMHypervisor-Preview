@@ -53,6 +53,9 @@ KSPIN_LOCK g_HyperCallbackListLock = { 0 };
 VMEXIT_CALLBACK g_CpuidCallbackList[MAX_CALLBACK_COUNT] = { 0 };
 VMEXIT_CALLBACK g_BpCallbackList[MAX_CALLBACK_COUNT] = { 0 };
 VMEXIT_CALLBACK g_HyperCallbackList[MAX_CALLBACK_COUNT] = { 0 };
+SVM_UNLOAD_CALLBACK g_MdlUnloadCallback = NULL;
+PMDL g_Mdl = NULL;
+UINT16 g_StartSuccess = 3;
 #pragma data_seg()
 #pragma data_seg("shadow$003")
 UINT64 ShadowEnd = 0;
@@ -65,7 +68,6 @@ BOOLEAN g_VmStart = FALSE;
 volatile BOOLEAN g_bSvmRunning = 0;
 volatile ULONG CpuCount = 0;
 volatile BOOLEAN g_SuspendGuest = FALSE;
-PMDL g_Mdl = NULL;
 BOOLEAN g_Unload = FALSE;
 BOOLEAN g_bDebug = FALSE;
 PVOID g_OriginalFunc = NULL;
@@ -251,7 +253,7 @@ VOID ResetShadowPageCallback(PVOID context)
 	while (TRUE)
 	{
 		KeSetPriorityThread((PKTHREAD)KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
-		timeout.QuadPart = -10000 * 5;
+		timeout.QuadPart = -10000 * 15;
 		if (!g_bSvmRunning) break;
 		for (UINT32 i = 0; i < min(CpuCount, MAX_SVM_THREADS); i++)
 		{
@@ -380,24 +382,26 @@ VOID PowerNotifyCallback(PVOID Context, PVOID Argument1, PVOID Argument2)
 }
 NTSTATUS VmStartWorker(PVOID context)
 {
+	InitializeListHead(&HookListHead);
+	KeInitializeSpinLock(&HookListLock);
+	KeInitializeSpinLock(&g_HyperCallbackListLock);
+	KeInitializeSpinLock(&g_CpuidCallbackListLock);
+	KeInitializeSpinLock(&g_BpCallbackListLock);
+	BOOLEAN pageLocked = FALSE;
 	PDRIVER_OBJECT DriverObject = (PDRIVER_OBJECT)context;
 	g_OriginalFunc = FindPspTerminateThreadByPointer();
 	PVOID OriginalFunc = g_OriginalFunc;
 	CpuCount = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
 	if (!CheckSvmSupport())
 	{
+		g_StartSuccess = FALSE;
 		return STATUS_UNSUCCESSFUL;
 	}
 	InitPageList();
 	if (!PrepareAllCpus())
 	{
-		KeBugCheckEx(0x3B, 0, 0, 0, 0);
+		goto StartFailed;
 	}
-	InitializeListHead(&HookListHead);
-	KeInitializeSpinLock(&HookListLock);
-	KeInitializeSpinLock(&g_HyperCallbackListLock);
-	KeInitializeSpinLock(&g_CpuidCallbackListLock);
-	KeInitializeSpinLock(&g_BpCallbackListLock);
 	for (size_t i = 0; i < CpuCount; i++)
 	{
 		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), TRUE, TRUE, FALSE);
@@ -425,7 +429,7 @@ NTSTATUS VmStartWorker(PVOID context)
 				DbgPrintEx(77, 0, "[+]successed to set entry shadow page for CPU %d.\n", i);
 			}
 		}
-	}
+	}else goto StartFailed;
 	PHOOK_INFO protectVmasm = AddHookInfo(&HookListHead, NULL, AsmGetVmAsmStartAddress(), VMASM_LENGTH, &HookListLock);
 	if (protectVmasm)
 	{
@@ -437,7 +441,7 @@ NTSTATUS VmStartWorker(PVOID context)
 				DbgPrintEx(77, 0, "[+]successed to set vmasm shadow page for CPU %d.\n", i);
 			}
 		}
-	}
+	}else goto StartFailed;
 	UINT64 hookLength = (UINT64)HookEnd - (UINT64)hook_test;
 	PHOOK_INFO HookFuncProtection = AddHookInfo(&HookListHead, NULL, (UINT64)hook_test, hookLength, &HookListLock);
 	if (HookFuncProtection)
@@ -450,7 +454,7 @@ NTSTATUS VmStartWorker(PVOID context)
 				DbgPrintEx(77, 0, "[+]successed to set hook protection shadow page for CPU %d.\n", i);
 			}
 		}
-	}
+	}else goto StartFailed;
 	PHOOK_INFO hookInfo = AddHookInfo(&HookListHead, NULL, (UINT64)&g_Test1, PAGE_SIZE, &HookListLock);
 	if (hookInfo)
 	{
@@ -462,12 +466,12 @@ NTSTATUS VmStartWorker(PVOID context)
 				DbgPrintEx(77, 0, "[+]successed to set shadow page for CPU %llu.\n", i);
 			}
 		}
-	}
+	}else goto StartFailed;
 	memset(TestBytes, 0xAA, sizeof(TestBytes));
 	PHOOK_INFO hookInfo3 = AddHookInfo(&HookListHead, NULL, (UINT64)ReservedTest, PAGE_SIZE * 2, &HookListLock);
-	if (!hookInfo3) KeBugCheckEx(0x3B, (ULONG_PTR)AddHookInfo, 0, 0, 0);
+	if (!hookInfo3) goto StartFailed;
 	hookInfo3->DataPage = TRUE;
-	if (!CreateShadowPage(hookInfo3, 0)) KeBugCheckEx(0x3B, (ULONG_PTR)CreateShadowPage, 0, 0, 0);
+	if (!CreateShadowPage(hookInfo3, 0)) goto StartFailed;
 	UINT8 tmpData[0x40] = { 0 };
 	memset(tmpData, 0x41, sizeof(tmpData));
 	ShadowCopyMemory(hookInfo3, 0, (UINT64)TestBytes, tmpData, 0x40);
@@ -476,17 +480,27 @@ NTSTATUS VmStartWorker(PVOID context)
 		SetGuestShadowPage(&(g_CpuContexts[i]), hookInfo3, 0, TRUE, FALSE, NULL);
 	}
 	PMDL mdl = IoAllocateMdl((PVOID)OriginalFunc, PAGE_SIZE * 3, FALSE, FALSE, NULL);
-	if (!mdl) KeBugCheckEx(0x3B, (ULONG_PTR)IoAllocateMdl, 0, 0, 0);
-	MmProbeAndLockPages(mdl, KernelMode, IoReadAccess);
+	if (!mdl) goto StartFailed;
+	__try
+	{
+		MmProbeAndLockPages(mdl, KernelMode, IoReadAccess);
+		pageLocked = TRUE;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		pageLocked = FALSE;
+		IoFreeMdl(mdl);
+		goto StartFailed;
+	}
 	g_Mdl = mdl;
 	PHOOK_INFO testHookInfo = AddHookInfo(&HookListHead, NULL, (UINT64)test, PAGE_SIZE, &HookListLock);
-	if (!testHookInfo) KeBugCheck(0x3B);
-	if (!CreateShadowPage(testHookInfo, 0)) KeBugCheckEx(0x3B, (ULONG_PTR)CreateShadowPage, 0, 0, 0);
-	if (!CreateShadowPage(testHookInfo, 1)) KeBugCheckEx(0x3B, (ULONG_PTR)CreateShadowPage, 0, 0, 0);
+	if (!testHookInfo) goto StartFailed;
+	if (!CreateShadowPage(testHookInfo, 0)) goto StartFailed;
+	if (!CreateShadowPage(testHookInfo, 1)) goto StartFailed;
 	PHOOK_FUNC_INFO testHookFuncInfo = AddHookFuncInfo(testHookInfo, (UINT64)test, (UINT64)hook_test, AsmGetJmpCodeLength());
-	if(!testHookFuncInfo)  KeBugCheckEx(0x3B, (ULONG_PTR)AddHookFuncInfo, 0, 0, 0);
+	if(!testHookFuncInfo) goto StartFailed; //KeBugCheckEx(0x3B, (ULONG_PTR)AddHookFuncInfo, 0, 0, 0);
 	PJMP_FUNC_TRAMPOLINE testFuncJmp = (PJMP_FUNC_TRAMPOLINE)AllocateJmpTrampoline(testHookFuncInfo, AsmGetJmpCodeFuncLength());
-	if(!testFuncJmp) KeBugCheckEx(0x3B, (ULONG_PTR)AllocateJmpTrampoline, 0, 0, 0);
+	if(!testFuncJmp) goto StartFailed;
 	memcpy(testFuncJmp, AsmGetJmpCodeFuncBase(), AsmGetJmpCodeFuncLength());
 	testHookFuncInfo->JumpTrampolineOffset = sizeof(testFuncJmp->Data);
 	UINT8 testCodeLen = GetInstructionLength((PVOID)test, 20);
@@ -504,13 +518,13 @@ NTSTATUS VmStartWorker(PVOID context)
 		SetGuestShadowPage(&(g_CpuContexts[i]), testHookInfo, 0, TRUE, FALSE, NULL);
 	}
 	PHOOK_INFO hookInfo4 = AddHookInfo(&HookListHead, NULL, (UINT64)OriginalFunc, PAGE_SIZE * 2, &HookListLock);
-	if(!hookInfo4) KeBugCheckEx(0x3B, (ULONG_PTR)AddHookInfo, 0, 0, 0);
-	if (!CreateShadowPage(hookInfo4, 0)) KeBugCheckEx(0x3B, (ULONG_PTR)CreateShadowPage, 0, 0, 0);
-	if (!CreateShadowPage(hookInfo4, 1)) KeBugCheckEx(0x3B, (ULONG_PTR)CreateShadowPage, 0, 0, 0);
+	if(!hookInfo4) goto StartFailed;
+	if (!CreateShadowPage(hookInfo4, 0)) goto StartFailed;
+	if (!CreateShadowPage(hookInfo4, 1)) goto StartFailed;
 	PHOOK_FUNC_INFO hookFuncInfo = AddHookFuncInfo(hookInfo4, (UINT64)OriginalFunc, (UINT64)Hook_Func, AsmGetJmpCodeLength());
-	if (!hookFuncInfo) KeBugCheckEx(0x3B, (ULONG_PTR)AddHookFuncInfo, 0, 0, 0);
+	if (!hookFuncInfo) goto StartFailed;
 	PJMP_FUNC_TRAMPOLINE FuncJmp = (PJMP_FUNC_TRAMPOLINE)AllocateJmpTrampoline(hookFuncInfo, AsmGetJmpCodeFuncLength());
-	if (!FuncJmp) KeBugCheckEx(0x3B, (ULONG_PTR)AllocateJmpTrampoline, 0, 0, 0);
+	if (!FuncJmp) goto StartFailed;
 	UINT8 FuncOriginalCodeLen = GetInstructionLength(OriginalFunc, 20);
 	if (g_bDebug) DbgPrintEx(77, 0, "[*]Original function prologue length: %d bytes.\n", FuncOriginalCodeLen);
 	memcpy(FuncJmp, AsmGetJmpCodeFuncBase(), AsmGetJmpCodeFuncLength());
@@ -528,6 +542,7 @@ NTSTATUS VmStartWorker(PVOID context)
 		SetGuestShadowPage(&(g_CpuContexts[i]), hookInfo4, 0, TRUE, FALSE, NULL);
 	}
 	DbgPrintEx(77, 0, "[*]Waiting to start SVM......\n");
+	g_StartSuccess = TRUE;
 	while (g_VmStart == FALSE)
 	{
 		LARGE_INTEGER timeout = { 0 };
@@ -560,6 +575,37 @@ NTSTATUS VmStartWorker(PVOID context)
 #endif
 	}
 	return STATUS_SUCCESS;
+StartFailed:
+	if (g_Mdl)
+	{
+		if (pageLocked)
+		{
+			MmUnlockPages(g_Mdl);
+		}
+		IoFreeMdl(g_Mdl);
+	}
+	RemoveAllHookInfo(&HookListHead, &HookListLock);
+	FreeAllPageList();
+	if (g_PowerCallbackHandle)
+	{
+		ExUnregisterCallback(g_PowerCallbackHandle);
+	}
+	if (g_PowerCallbackObj)
+	{
+		ObDereferenceObject(g_PowerCallbackObj);
+	}
+	if (g_CpuContexts)
+	{
+		for (UINT32 i = 0; i < CpuCount; i++)
+		{
+			FreeVMCB(&(g_CpuContexts[i]));
+			FreeSvmPageTable(&(g_CpuContexts[i]));
+		}
+		ExFreePoolWithTag(g_CpuContexts, 'SVM');
+	}
+	FreeNptPageTable(&g_ZeroPage);
+	g_StartSuccess = FALSE;
+	return STATUS_UNSUCCESSFUL;
 }
 VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 {
@@ -585,18 +631,32 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 		_enable();
 		KeRevertToUserGroupAffinityThread(&oldAffinity);
 	}
-	MmUnlockPages(g_Mdl);
-	IoFreeMdl(g_Mdl);
-	RemoveAllHookInfo(&HookListHead, &HookListLock);
-	for (UINT32 i = 0; i < CpuCount; i++)
+	if (g_Mdl)
 	{
-		FreeVMCB(&(g_CpuContexts[i]));
-		FreeSvmPageTable(&(g_CpuContexts[i]));
+		MmUnlockPages(g_Mdl);
+		IoFreeMdl(g_Mdl);
+	}
+	if (g_MdlUnloadCallback) g_MdlUnloadCallback(DriverObject);
+	RemoveAllHookInfo(&HookListHead, &HookListLock);
+	if (g_CpuContexts)
+	{
+		for (UINT32 i = 0; i < CpuCount; i++)
+		{
+			FreeVMCB(&(g_CpuContexts[i]));
+			FreeSvmPageTable(&(g_CpuContexts[i]));
+		}
+		ExFreePoolWithTag(g_CpuContexts, 'SVM');
 	}
 	FreeAllPageList();
-	ExUnregisterCallback(g_PowerCallbackHandle);
-	ObDereferenceObject(g_PowerCallbackObj);
-	ExFreePoolWithTag(g_CpuContexts, 'SVM');
+	if (g_PowerCallbackHandle)
+	{
+		ExUnregisterCallback(g_PowerCallbackHandle);
+	}
+	if (g_PowerCallbackObj)
+	{
+		ObDereferenceObject(g_PowerCallbackObj);
+	}
+	FreeNptPageTable(&g_ZeroPage);
 	if (g_bDebug) DbgPrintEx(77,0,"[+]Hypervisor Driver is unloaded\n");
 }
 NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
@@ -615,9 +675,31 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	);
 	if (NT_SUCCESS(status))
 	{
+		PETHREAD thread = NULL;
+		status = ObReferenceObjectByHandle(threadHandle, THREAD_ALL_ACCESS, *PsThreadType, KernelMode, &thread, NULL);
+		if (!NT_SUCCESS(status)) KeBugCheck(OBJECT1_INITIALIZATION_FAILED);
+		while (g_StartSuccess == 3)
+		{
+			LARGE_INTEGER timeout = { 0 };
+			timeout.QuadPart = -10000 * 10;
+			KeDelayExecutionThread(KernelMode, FALSE, &timeout);
+		}
+		if (g_StartSuccess == FALSE)
+		{
+			KeWaitForSingleObject(thread, Executive, KernelMode, FALSE, NULL);
+			status = STATUS_UNSUCCESSFUL;
+		}
+		else if (g_StartSuccess == TRUE) status = STATUS_SUCCESS;
+		else 
+		{
+			KeWaitForSingleObject(thread, Executive, KernelMode, FALSE, NULL);
+			status = STATUS_UNSUCCESSFUL;
+		}
+		ObDereferenceObject(thread);
 		ZwClose(threadHandle);
+		return status;
 	}
-	return status;
+	else return status;
 }
 #pragma code_seg()
 #pragma code_seg(".entry$003")
@@ -734,7 +816,7 @@ void VmExitHandler(PCPU_CONTEXT context, PGUEST_REGS Regs)
 			hookInfo = EnumNextHookInfo(&HookListHead, hookInfo, NULL);
 			while (hookInfo)
 			{
-				if(!hookInfo->DataPage) SetGuestShadowPage(context, hookInfo, 0, TRUE, FALSE, &GuestVmcbVa->ControlArea.TlbControl);
+				if (!hookInfo->DataPage) SetGuestShadowPage(context, hookInfo, 0, TRUE, FALSE, &GuestVmcbVa->ControlArea.TlbControl);
 				hookInfo = EnumNextHookInfo(&HookListHead, hookInfo, NULL);
 			}
 			GuestVmcbVa->StateSaveArea.Rip = GuestVmcbVa->ControlArea.NRip;
@@ -993,20 +1075,30 @@ __forceinline void ResumeAllGuest()
 	g_VmStart = TRUE;
 	g_SuspendGuest = FALSE;
 	g_bSvmRunning = TRUE;
+	BOOLEAN result = FALSE;
 	for (size_t i = 0; i < CpuCount; i++)
 	{
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), TRUE, TRUE, FALSE);
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)&ShadowStart, GET_PAGE_ALIGN_LENGTH(SHADOW_SIZE), TRUE, TRUE, FALSE);
+		result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts, GET_PAGE_ALIGN_LENGTH(CpuCount * sizeof(CPU_CONTEXT)), TRUE, TRUE, FALSE);
+		BP_DEBUG(result);
+		result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)&ShadowStart, GET_PAGE_ALIGN_LENGTH(SHADOW_SIZE), TRUE, TRUE, FALSE);
+		BP_DEBUG(result);
 		for (size_t j = 0; j < CpuCount; j++)
 		{
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].GuestVmcb.VirtualAddress, g_CpuContexts[j].GuestVmcb.Size, TRUE, TRUE, FALSE);
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostVmcb.VirtualAddress, g_CpuContexts[j].HostVmcb.Size, TRUE, TRUE, FALSE);
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostStack.VirtualAddress, g_CpuContexts[j].HostStack.Size, TRUE, TRUE, FALSE);
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Hsave.VirtualAddress, g_CpuContexts[j].Hsave.Size, TRUE, TRUE, FALSE);
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Iopm.VirtualAddress, g_CpuContexts[j].Iopm.Size, FALSE, TRUE, FALSE);
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Msrpm.VirtualAddress, g_CpuContexts[j].Msrpm.Size, FALSE, TRUE, FALSE);
+			result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].GuestVmcb.VirtualAddress, g_CpuContexts[j].GuestVmcb.Size, TRUE, TRUE, FALSE);
+			BP_DEBUG(result);
+			result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostVmcb.VirtualAddress, g_CpuContexts[j].HostVmcb.Size, TRUE, TRUE, FALSE);
+			BP_DEBUG(result);
+			result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].HostStack.VirtualAddress, g_CpuContexts[j].HostStack.Size, TRUE, TRUE, FALSE);
+			BP_DEBUG(result);
+			result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Hsave.VirtualAddress, g_CpuContexts[j].Hsave.Size, TRUE, TRUE, FALSE);
+			BP_DEBUG(result);
+			result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Iopm.VirtualAddress, g_CpuContexts[j].Iopm.Size, FALSE, TRUE, FALSE);
+			BP_DEBUG(result);
+			result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)g_CpuContexts[j].Msrpm.VirtualAddress, g_CpuContexts[j].Msrpm.Size, FALSE, TRUE, FALSE);
+			BP_DEBUG(result);
 		}
-		SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)IsVirtualCpu, GET_PAGE_ALIGN_LENGTH(sizeof(IsVirtualCpu)), FALSE, TRUE, FALSE);
+		result = SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)IsVirtualCpu, GET_PAGE_ALIGN_LENGTH(sizeof(IsVirtualCpu)), FALSE, TRUE, FALSE);
+		BP_DEBUG(result);
 	}
 	funcHookInfo = EnumNextHookInfo(&HookListHead, funcHookInfo, NULL);
 	while (funcHookInfo)
@@ -1015,7 +1107,8 @@ __forceinline void ResumeAllGuest()
 		{
 			if (!funcHookInfo->DataPage)
 			{
-				SetGuestShadowPage(&(contexts[i]), funcHookInfo, 0, TRUE, FALSE, NULL);
+				result = SetGuestShadowPage(&(contexts[i]), funcHookInfo, 0, TRUE, FALSE, NULL);
+				BP_DEBUG(result);
 			}
 		}
 		funcHookInfo = EnumNextHookInfo(&HookListHead, funcHookInfo, NULL);
@@ -1026,7 +1119,8 @@ __forceinline void ResumeAllGuest()
 	{
 		for (UINT32 i = 0; i < CpuCount; i++)
 		{
-			SetGuestShadowPage(&(contexts[i]), hookInfo, NO_SHADOW_PAGE, TRUE, FALSE, NULL);
+			result = SetGuestShadowPage(&(contexts[i]), hookInfo, NO_SHADOW_PAGE, TRUE, FALSE, NULL);
+			BP_DEBUG(result);
 		}
 	}
 	for (UINT32 i = 0; i < CpuCount; i++)

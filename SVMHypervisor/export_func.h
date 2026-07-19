@@ -4,12 +4,29 @@
 #include "VMCB.h"
 #include <intrin.h>
 #include "asmfunc.h"
+#if DBG
+#define BP_DEBUG(x)		\
+    do {                             \
+        if (!(x)) {                  \
+            __debugbreak();  \
+        }                            \
+    } while (0)
+
+#else
+
+#define BP_DEBUG(x)                  \
+    do {                             \
+        (void)(x);                   \
+    } while (0)
+#endif
 #define HV_VMMCALL_READMEMORY 0x40000000
 #define MAX_CALLBACK_COUNT 64
 #define CPUID_CALLBACK 1
 #define VMM_CALLBACK 2
 #define BP_CALLBACK 3
 typedef VOID(__stdcall* VMEXIT_CALLBACK)(PCPU_CONTEXT Context, PGUEST_REGS Regs);
+typedef VOID(__stdcall* SVM_UNLOAD_CALLBACK)(PDRIVER_OBJECT DriverObject);
+EXTERN_C _declspec(dllexport) SVM_UNLOAD_CALLBACK g_MdlUnloadCallback;
 EXTERN_C LIST_ENTRY HookListHead;
 EXTERN_C KSPIN_LOCK HookListLock;
 EXTERN_C _declspec(dllexport) BOOLEAN g_Test;

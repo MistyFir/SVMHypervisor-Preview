@@ -230,6 +230,8 @@ typedef struct _GUEST_REGS {
     unsigned __int64 r15;
 } GUEST_REGS, * PGUEST_REGS;
 typedef VOID(__stdcall* VMEXIT_CALLBACK)(PCPU_CONTEXT Context, PGUEST_REGS Regs);
+typedef VOID(__stdcall* SVM_UNLOAD_CALLBACK)(PDRIVER_OBJECT DriverObject);
+EXTERN_C _declspec(dllimport) SVM_UNLOAD_CALLBACK g_MdlUnloadCallback;
 EXTERN_C _declspec(dllimport) PCPU_CONTEXT g_CpuContexts;
 EXTERN_C _declspec(dllimport) BOOLEAN g_VmStart;
 EXTERN_C _declspec(dllimport) BOOLEAN g_Test;

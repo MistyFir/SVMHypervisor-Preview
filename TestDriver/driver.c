@@ -300,6 +300,16 @@ VOID MyCallback(PVOID context)
 		}
 	}
 }
+VOID UnloadSvmMdl(PDRIVER_OBJECT DriverObject)
+{
+	UNREFERENCED_PARAMETER(DriverObject);
+	if (g_NtOpenProcessMdl)
+	{
+		MmUnlockPages(g_NtOpenProcessMdl);
+		IoFreeMdl(g_NtOpenProcessMdl);
+		g_NtOpenProcessMdl = NULL;
+	}
+}
 VOID UnloadDriver(PDRIVER_OBJECT DriverObject)
 {
 	UNREFERENCED_PARAMETER(DriverObject);
@@ -315,18 +325,13 @@ VOID UnloadDriver(PDRIVER_OBJECT DriverObject)
 		IoFreeMdl(g_Test1Mdl);
 		g_Test1Mdl = NULL;
 	}
-	if (g_NtOpenProcessMdl)
-	{
-		MmUnlockPages(g_NtOpenProcessMdl);
-		IoFreeMdl(g_NtOpenProcessMdl);
-		g_NtOpenProcessMdl = NULL;
-	}
 	IoDeleteSymbolicLink(&symbolicLink);
 	IoDeleteDevice(g_DeviceObject);
 }
 NTSTATUS TestStartThread(PVOID context)
 {
 	PDRIVER_OBJECT DriverObject = (PDRIVER_OBJECT)context;
+	g_MdlUnloadCallback = UnloadSvmMdl;
 	SvmProtectDriverSection((UINT64)HookNtOpenProcess, PAGE_SIZE, FALSE, NULL, 0);
 	UNICODE_STRING funcName = RTL_CONSTANT_STRING(L"NtOpenProcess");
 	PVOID funcAddress = MmGetSystemRoutineAddress(&funcName);

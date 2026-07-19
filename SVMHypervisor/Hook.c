@@ -14,7 +14,23 @@ PHOOK_PAGE_INFO AllocateHookPageInfo(SIZE_T PageCount)
 		memset(HookPageInfo, 0, allocSize);
 		for (UINT32 i = 0; i < CpuCount; i++)
 		{
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)HookPageInfo, allocSize, TRUE, TRUE, FALSE);
+			if (!SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)HookPageInfo, allocSize, TRUE, TRUE, FALSE))
+			{
+				for (UINT32 j = 0; j <= i; j++)
+				{
+					SetNestedPageProtection(
+						&g_CpuContexts[j],
+						(UINT64)HookPageInfo,
+						allocSize,
+						FALSE,
+						TRUE,
+						TRUE
+					);
+				}
+				ExFreePoolWithTag(HookPageInfo, HOOK_POOL);
+				HookPageInfo = NULL;
+				break;
+			}
 		}
 		return HookPageInfo;
 	}
@@ -27,7 +43,7 @@ VOID FreeHookPageInfo(PHOOK_PAGE_INFO HookPageInfo,SIZE_T PageCount)
 		SIZE_T allocSize = GET_PAGE_ALIGN_LENGTH(sizeof(HOOK_PAGE_INFO) * PageCount);
 		for (UINT32 i = 0; i < CpuCount; i++)
 		{
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)HookPageInfo, allocSize, FALSE, TRUE, FALSE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)HookPageInfo, allocSize, FALSE, TRUE, TRUE);
 		}
 		ExFreePoolWithTag(HookPageInfo, HOOK_POOL);
 	}
@@ -61,6 +77,10 @@ PHOOK_INFO AddHookInfo(PLIST_ENTRY ListHead, PCSTR TagStr, UINT64 VirtualAddress
 	}
 	PVOID VirtualBaseAddress = (PVOID)GET_4KB_PAGE_BASE(VirtualAddress);
 	if (!VirtualBaseAddress) {
+		FreeHookPageInfo(
+			hookInfo->HookPageInfo,
+			hookInfo->PageBaseCount
+		);
 		ExFreePoolWithTag(hookInfo, HOOK_POOL);
 		return NULL;
 	}
@@ -77,6 +97,7 @@ PHOOK_INFO AddHookInfo(PLIST_ENTRY ListHead, PCSTR TagStr, UINT64 VirtualAddress
 #ifdef DBG
 					DbgPrintEx(77, 0, "[-]Core %d Failed to split large page for physical address: 0x%llX\n", j,tmpPhysicalAddr);
 #endif // DBG
+					FreeHookPageInfo(hookInfo->HookPageInfo, hookInfo->PageBaseCount);
 					ExFreePoolWithTag(hookInfo, HOOK_POOL);
 					return NULL;
 				}
@@ -92,9 +113,13 @@ PHOOK_INFO AddHookInfo(PLIST_ENTRY ListHead, PCSTR TagStr, UINT64 VirtualAddress
 	}
 	if (!result)
 	{
+		FreeHookPageInfo(
+			hookInfo->HookPageInfo,
+			hookInfo->PageBaseCount
+		);
 		for (UINT32 i = 0; i < CpuCount; i++)
 		{
-			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)hookInfo, hookInfoSize, TRUE, FALSE, TRUE);
+			SetNestedPageProtection(&(g_CpuContexts[i]), (UINT64)hookInfo, hookInfoSize, FALSE, FALSE, TRUE);
 		}
 		ExFreePoolWithTag(hookInfo, HOOK_POOL);
 		return NULL;
